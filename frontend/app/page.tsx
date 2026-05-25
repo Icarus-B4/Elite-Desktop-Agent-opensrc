@@ -548,15 +548,20 @@ function LiveKitPageContent() {
   }, [isEliteOnline, token, isConnecting, onConnect]);
 
   useEffect(() => {
-    if (!isLiveKitRateLimited() && rateLimitRemainingMs === 0) return;
-    const tick = () => setRateLimitRemainingMs(getLiveKitRateLimitRemainingMs());
+    const tick = () => {
+      if (isLiveKitRateLimited()) {
+        setRateLimitRemainingMs(getLiveKitRateLimitRemainingMs());
+      } else {
+        setRateLimitRemainingMs(0);
+      }
+    };
     tick();
     const id = window.setInterval(tick, 1000);
     return () => window.clearInterval(id);
-  }, [rateLimitRemainingMs]);
+  }, []);
 
   const mainSurfaceClass =
-    'relative flex h-screen w-full flex-col items-center overflow-hidden text-white font-sans selection:bg-[#00f2ff]/30 rounded-[32px] border border-white/10 shadow-[0_0_50px_rgba(0,0,0,0.5)] ' +
+    'relative flex h-screen w-full flex-col items-center overflow-hidden text-white font-sans selection:bg-[#00f2ff]/90rounded- border border-white/10 shadow-[0_0_50px_rgba(0,0,0,0.5)] ' +
     (isElectron
       ? 'bg-[#000b1a]/94 backdrop-blur-xl'
       : 'bg-[#000b1a]/95');
