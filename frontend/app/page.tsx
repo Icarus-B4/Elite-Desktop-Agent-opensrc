@@ -881,9 +881,6 @@ function LiveKitPageContent() {
                   <button className="flex-1 h-10 rounded-xl bg-[#ff0080]/15 text-[#ff0080] text-xs font-bold uppercase tracking-wider ring-1 ring-[#ff0080]/30 transition-all">
                     Deutsch
                   </button>
-                  <button className="flex-1 h-10 rounded-xl bg-white/5 text-white/30 text-xs font-bold uppercase tracking-wider ring-1 ring-white/5 hover:bg-white/10 hover:text-white/60 transition-all">
-                    English
-                  </button>
                 </div>
               </div>
 

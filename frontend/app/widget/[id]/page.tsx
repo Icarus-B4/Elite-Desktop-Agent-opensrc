@@ -147,7 +147,7 @@ function PopoutShell() {
           <button
             type="button"
             onClick={handleReturnToHud}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[9px] font-bold uppercase tracking-wider text-white/40 hover:text-primary bg-black/30 hover:bg-black/50 backdrop-blur-md ring-1 ring-white/10 transition-all"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[9px] font-bold uppercase tracking-wider text-white/80 hover:text-primary bg-yellow-800/100 hover:bg-blue-500/50 backdrop-blur-md ring-1 ring-white/10 transition-all"
           >
             <ArrowLeft className="size-3" />
             HUD
@@ -157,14 +157,14 @@ function PopoutShell() {
 
       {/* ── Widget-Inhalt ───────────────── */}
       <div
-        className={`px-2 pb-2 rounded-b-2xl overflow-hidden ${isTerminal ? 'flex-1 min-h-0 flex flex-col' : ''}`}
+        className={`px-2 pb-2 rounded-b-xl overflow-hidden ${isTerminal ? 'flex-1 min-h-0 flex flex-col' : ''}`}
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
         <div
           className={`overflow-hidden ${
             isTerminal
-              ? 'flex-1 min-h-0 flex flex-col bg-transparent shadow-none ring-0 rounded-[32px] overflow-hidden'
-              : 'rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.55)] ring-1 ring-white/10'
+              ? 'flex-1 min-h-0 flex flex-col bg-transparent shadow-none ring-0 rounded-xl overflow-hidden'
+              : 'rounded-xl shadow-[0_20px_60px_rgba(0,0,0,0.55)] ring-1 ring-white/10'
           }`}
         >
           {renderPopoutWidget(widgetId)}

@@ -221,7 +221,7 @@ export function TerminalWidget() {
     return (
       <div
         className={`relative flex flex-col w-full overflow-hidden ${
-          glass ? 'h-full flex-1 rounded-[32px]' : 'h-[500px] rounded-2xl'
+          glass ? 'h-full flex-1 rounded-xl' : 'h-[500px] rounded-lg'
         } ${glass ? 'elite-hud-window-surface' : ''}`}
         aria-hidden
       >
@@ -234,8 +234,8 @@ export function TerminalWidget() {
     <div
       className={`relative flex flex-col w-full overflow-hidden text-white font-sans ${
         glass
-          ? 'elite-terminal-glass elite-hud-window-surface h-full flex-1 rounded-[32px] isolation-isolate'
-          : 'h-[500px] rounded-2xl bg-[#000d1a]/95 border border-cyan-500/20 shadow-[0_0_30px_rgba(0,242,255,0.15)]'
+          ? 'elite-terminal-glass elite-hud-window-surface h-full flex-1 rounded-xl isolation-isolate'
+          : 'h-[500px] rounded-lg bg-[#000d1a]/95 border border-cyan-500/20 shadow-[0_0_30px_rgba(0,242,255,0.15)]'
       }`}
     >
       {glass && <GridBackground />}
@@ -632,7 +632,7 @@ function XtermPanel({
 
   return (
     <div
-      className={`relative flex-1 min-w-0 min-h-0 border rounded-xl overflow-hidden group ${
+      className={`relative flex-1 min-w-0 min-h-0 border rounded-md overflow-hidden group ${
         isPopout
           ? 'elite-terminal-panel bg-transparent border-white/10'
           : 'bg-[#000d1a] border-white/5'
@@ -648,7 +648,7 @@ function XtermPanel({
       />
 
       {isDropTarget && (
-        <div className="pointer-events-none absolute inset-0 z-[5] flex items-center justify-center bg-cyan-500/10 border-2 border-dashed border-cyan-400/40 rounded-xl">
+        <div className="pointer-events-none absolute inset-0 z-[5] flex items-center justify-center bg-cyan-500/10 border-2 border-dashed border-cyan-400/40 rounded-md">
           <span className="text-[10px] font-bold uppercase tracking-widest text-cyan-300/90">
             Pfad einfügen
           </span>
