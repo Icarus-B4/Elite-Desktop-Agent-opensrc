@@ -1,0 +1,503 @@
+const { spawn, exec } = require('child_process');
+const path = require('path');
+const { app } = require('electron');
+const fs = require('fs');
+const os = require('os');
+const kill = require('tree-kill');
+const { promisify } = require('util');
+const {
+  getPaiRoot,
+  getPulseManagerScript,
+  buildPulseCommand,
+  createPulseProcess,
+} = require('./pai-runtime');
+const {
+  getHermesGatewayUrl,
+  getHermesDashboardUrl,
+  buildHermesStackStartCommand,
+  createHermesGatewayProcess,
+  getHermesRuntimeInfo,
+} = require('./hermes-runtime');
+
+let buildServiceEnv;
+let getAppDataBackendDir;
+try {
+  ({ buildServiceEnv, getAppDataBackendDir } = require('./env-bootstrap'));
+} catch (err) {
+  console.warn('[Services] env-bootstrap nicht verfügbar:', err.message);
+  buildServiceEnv = (_root, baseEnv = process.env) => ({ ...baseEnv });
+  getAppDataBackendDir = () => null;
+}
+
+const execAsync = promisify(exec);
+const {
+  getServicesLogPath,
+  getEliteOnlyLogPath,
+  appendLogLine,
+  rotateIfHuge,
+} = require('./log-path');
+
+let ensureDockerReady = async () => true;
+try {
+  ({ ensureDockerReady } = require('./docker-bootstrap'));
+} catch (err) {
+  console.warn('[Services] docker-bootstrap nicht verfügbar:', err.message);
+}
+
+let ROOT;
+let logFile;
+let eliteLogFile;
+let processes = [];
+let readiness = {
+  backend: false,
+  hermes: false,
+  hermesDashboard: false,
+  missionControl: false,
+  frontend: false,
+  pulse: false,
+};
+
+const ELITE_PORTS = [7861, 8001, 3000, 3001, 31337, 8642, 9119, 8643];
+const FRONTEND_URL = process.env.ELITE_FRONTEND_URL || 'http://127.0.0.1:3000';
+
+function initPaths() {
+  if (ROOT) return;
+  ROOT = path.resolve(__dirname, '..');
+  logFile = getServicesLogPath();
+  eliteLogFile = getEliteOnlyLogPath();
+  rotateIfHuge(logFile);
+  rotateIfHuge(eliteLogFile);
+}
+
+function shouldLogJarvisCoreLine(text) {
+  const t = text.trim();
+  if (!t) return false;
+  if (/error|failed|FATAL|ECONNREFUSED|Exception|Traceback|WARN(?!ING)/i.test(t)) return true;
+  if (/Compil|Ready|started|listening|agent\.py|LiveKit|Backend/i.test(t)) return true;
+  if (/^\s*(GET|POST|PUT|DELETE) \/api\/(elite\/settings|system-status|hermes\/overview)/i.test(t)) {
+    return false;
+  }
+  if (/^\s*(GET|POST) \/api\//i.test(t)) return false;
+  return true;
+}
+
+function log(msg, { eliteOnly = false } = {}) {
+  const line = `[${new Date().toISOString()}] ${msg}\n`;
+  if (logFile) appendLogLine(logFile, line);
+  const isEliteLine =
+    eliteOnly ||
+    msg.includes('[Services]') ||
+    msg.includes('[Hermes') ||
+    msg.includes('[PAI Pulse]') ||
+    msg.includes('[Docker]') ||
+    msg.includes('KRITISCHER') ||
+    msg.includes('FATAL') ||
+    msg.includes('-Error]');
+  if (eliteLogFile && isEliteLine) appendLogLine(eliteLogFile, line);
+}
+
+function logProcessOutput(serviceName, text) {
+  const chunk = text.toString().trim();
+  if (!chunk) return;
+  for (const part of chunk.split(/\r?\n/)) {
+    if (!part.trim()) continue;
+    if (serviceName === 'Jarvis Core' && !shouldLogJarvisCoreLine(part)) continue;
+    log(`[${serviceName}] ${part}`);
+  }
+}
+
+async function checkHttpReady(url, timeoutMs = 2500) {
+  try {
+    await execAsync(
+      `powershell.exe -NoProfile -Command "(Invoke-WebRequest -UseBasicParsing -Uri '${url}' -TimeoutSec 2).StatusCode"`,
+      { windowsHide: true, timeout: timeoutMs },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForFrontend(maxMs = 120000) {
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    if (await checkHttpReady(FRONTEND_URL, 4000)) {
+      log(`[Services] Frontend bereit: ${FRONTEND_URL}`, { eliteOnly: true });
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  log(
+    `[Services] WARNUNG: Frontend nicht erreichbar (${FRONTEND_URL}). ` +
+      'Prüfe EliteAgent_services.log — oft blockiert ein Zombie-Prozess Port 3000.',
+    { eliteOnly: true },
+  );
+  return false;
+}
+
+async function checkPulseReady() {
+  return checkHttpReady(`${process.env.PAI_PULSE_URL || 'http://127.0.0.1:31337'}/api/pulse/health`);
+}
+
+async function checkHermesGatewayReady() {
+  const base = getHermesGatewayUrl();
+  return checkHttpReady(`${base}/v1/models`, 2000);
+}
+
+async function checkHermesDashboardReady() {
+  return checkHttpReady(getHermesDashboardUrl(), 2000);
+}
+
+async function setReadinessSnapshot() {
+  const hermes = await checkHermesGatewayReady();
+  const hermesDashboard = await checkHermesDashboardReady();
+  readiness = {
+    backend: await checkHttpReady('http://127.0.0.1:7861', 2000),
+    hermes,
+    hermesDashboard,
+    missionControl: hermes || hermesDashboard,
+    frontend: await checkHttpReady(FRONTEND_URL, 2000),
+    pulse: await checkPulseReady(),
+  };
+}
+
+async function freePort(port) {
+  try {
+    const { stdout } = await execAsync(
+      `powershell.exe -NoProfile -Command "Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess"`,
+      { windowsHide: true, timeout: 8000 },
+    );
+    const pids = new Set();
+    for (const line of stdout.split(/\r?\n/)) {
+      const pid = line.trim();
+      if (/^\d+$/.test(pid)) pids.add(pid);
+    }
+    for (const pid of pids) {
+      log(`[Services] Port ${port}: beende PID ${pid}`);
+      try {
+        await execAsync(`taskkill /F /PID ${pid}`, { windowsHide: true, timeout: 5000 });
+      } catch {
+        /* bereits beendet */
+      }
+    }
+  } catch {
+    /* Port frei */
+  }
+}
+
+async function cleanupOldInstances() {
+  log('[Services] Cleanup: Elite-Python, LiveKit-Worker, Elite-Ports…');
+  const psScript = `
+    try {
+      $ProgressPreference = 'SilentlyContinue'
+      $ErrorActionPreference = 'SilentlyContinue'
+      $patterns = @('agent.py', 'frame_analyzer.py', 'livekit.agents', '_run_worker')
+      Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $p = $_.CommandLine; $p -and ($patterns | Where-Object { $p -like "*$_*" }) } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+      Get-Process -Name 'UiAutomationGRPC.Server' -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    } catch {}
+    exit 0
+  `.trim();
+  const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+  try {
+    await execAsync(`powershell.exe -NoProfile -EncodedCommand ${encoded}`, {
+      windowsHide: true,
+      timeout: 20000,
+    });
+    log('[Services] Elite-Prozesse bereinigt.');
+  } catch (e) {
+    log(`[Services] Cleanup Python: ${e.message}`);
+  }
+
+  for (const port of ELITE_PORTS) {
+    await freePort(port);
+  }
+  await new Promise((r) => setTimeout(r, 800));
+}
+
+async function startServices() {
+  try {
+    initPaths();
+    log('====================================================', { eliteOnly: true });
+    log(`[Services] START - Root: ${ROOT}`, { eliteOnly: true });
+    log(`[Services] Log-Dateien: ${logFile}`, { eliteOnly: true });
+    log(`[Services] Elite-Log (ohne HTTP-Spam): ${eliteLogFile}`, { eliteOnly: true });
+
+    if (process.platform === 'win32') {
+      log('[Services] Docker/LiveKit Bootstrap (nur bei livekitMode=local)…');
+      const dockerOk = await ensureDockerReady({
+        logger: (msg) => log(`[Services] ${msg}`),
+        maxWaitMs: 120000,
+      });
+      if (!dockerOk) {
+        log(
+          '[Services] WARNUNG: Docker/LiveKit nicht bereit. ' +
+            'Einstellungen → LiveKit „Cloud“ oder scripts/repair-docker-inference.ps1 ausführen.',
+        );
+      }
+    }
+
+    await cleanupOldInstances();
+
+    log('[Services] Warte 1s auf Port-Freigabe…');
+    await new Promise((r) => setTimeout(r, 1000));
+
+    const isPackaged = ROOT.includes('WindowsApps') || ROOT.includes('Program Files');
+
+    const debugExe = path.join(ROOT, 'backend', 'pty-server', 'target', 'debug', 'elite-pty-server.exe');
+    const releaseExe = path.join(ROOT, 'backend', 'pty-server', 'target', 'release', 'elite-pty-server.exe');
+    const ptyExe = fs.existsSync(releaseExe) ? releaseExe : debugExe;
+    log(`[Services] PTY Server Exe Pfad: ${ptyExe}`);
+
+    let serviceCommands = [];
+
+    const pulseManagerScript = getPulseManagerScript();
+    const pulseApi = process.env.PAI_PULSE_URL || 'http://127.0.0.1:31337';
+    const paiRoot = getPaiRoot();
+    const hermesStack = buildHermesStackStartCommand();
+    const hermesInfo = getHermesRuntimeInfo();
+    log(
+      `[Services] Hermes runtime=${hermesInfo.active}` +
+        (hermesInfo.distro ? ` distro=${hermesInfo.distro}` : '') +
+        ` home=${hermesInfo.home} (Gateway 8642 + Dashboard 9119)`,
+    );
+
+    if (!isPackaged) {
+      log('[Services] Dev-Modus: Jarvis Core + Frontend + Hermes + PAI Pulse + PTY Server');
+      serviceCommands = [
+        { name: 'Jarvis Core', cmd: 'yarn run start:core', cwd: ROOT },
+        { name: 'Frontend', cmd: 'yarn run dev', cwd: path.join(ROOT, 'frontend') },
+        {
+          name: 'Hermes Stack',
+          cmd: `${hermesStack.cmd} ${hermesStack.args.join(' ')}`,
+          cwd: ROOT,
+          hermesStack: true,
+        },
+        {
+          name: 'PAI Pulse',
+          cmd: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${pulseManagerScript}" start`,
+          cwd: ROOT,
+        },
+        {
+          name: 'PTY Server',
+          cmd: ptyExe,
+          cwd: path.join(ROOT, 'backend', 'pty-server'),
+        },
+      ];
+    } else {
+      log('[Services] Prod-Modus: Hermes (Gateway+Dashboard) + Backend + Frontend + Pulse + PTY Server');
+      serviceCommands = [
+        {
+          name: 'Hermes Stack',
+          cmd: `${hermesStack.cmd} ${hermesStack.args.join(' ')}`,
+          cwd: ROOT,
+          hermesStack: true,
+        },
+        { name: 'Backend Agent', cmd: 'python agent.py start', cwd: path.join(ROOT, 'backend') },
+        { name: 'Frame Analyzer', cmd: 'python frame_analyzer.py', cwd: path.join(ROOT, 'backend') },
+        {
+          name: 'Frontend',
+          cmd: 'node server.js',
+          cwd: path.join(ROOT, 'frontend'),
+        },
+        {
+          name: 'UI Automation',
+          cmd: `"${path.join(ROOT, 'lib', 'automation', 'UiAutomationGRPC.Server.exe')}"`,
+          cwd: ROOT,
+        },
+        {
+          name: 'PAI Pulse',
+          cmd: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${pulseManagerScript}" start`,
+          cwd: ROOT,
+        },
+        {
+          name: 'PTY Server',
+          cmd: ptyExe,
+          cwd: path.join(ROOT, 'backend', 'pty-server'),
+        },
+      ];
+    }
+
+    const eliteFileEnv = buildServiceEnv(ROOT);
+    log(
+      `[Services] Env: OPENAI_API_KEY=${eliteFileEnv.OPENAI_API_KEY ? 'gesetzt' : 'FEHLT'}, ` +
+        `LIVEKIT_URL=${eliteFileEnv.LIVEKIT_URL || '(leer)'}, HERMES_GATEWAY=${getHermesGatewayUrl()}, ` +
+        `AppData=${getAppDataBackendDir() || 'n/a'}`,
+    );
+
+    serviceCommands.forEach((service) => {
+      log(`[Services] Starte ${service.name} in ${service.cwd}...`);
+
+      let cmd;
+      let args;
+      if (service.name === 'UI Automation') {
+        cmd = path.join(ROOT, 'lib', 'automation', 'UiAutomationGRPC.Server.exe');
+        args = [];
+      } else if (service.name === 'PAI Pulse') {
+        const pulse = buildPulseCommand('start');
+        cmd = pulse.cmd;
+        args = pulse.args;
+      } else if (service.hermesStack) {
+        const stack = buildHermesStackStartCommand();
+        cmd = stack.cmd;
+        args = stack.args;
+      } else if (service.hermes) {
+        const { buildHermesGatewayCommand } = require('./hermes-runtime');
+        const hermes = buildHermesGatewayCommand('start');
+        cmd = hermes.cmd;
+        args = hermes.args;
+      } else if (service.name === 'Jarvis Core' && process.platform === 'win32') {
+        cmd = process.env.ComSpec || 'cmd.exe';
+        args = ['/d', '/s', '/c', 'yarn run start:core'];
+      } else if (service.name === 'Frontend' && process.platform === 'win32') {
+        cmd = process.env.ComSpec || 'cmd.exe';
+        args = ['/d', '/s', '/c', 'yarn run dev'];
+      } else if (service.name === 'PTY Server') {
+        cmd = ptyExe;
+        args = [];
+      } else {
+        const parts = service.cmd.split(' ');
+        cmd = parts[0];
+        args = parts.slice(1);
+      }
+
+      const useShell =
+        service.name !== 'UI Automation' &&
+        service.name !== 'Jarvis Core' &&
+        service.name !== 'Frontend' &&
+        service.name !== 'PTY Server' &&
+        !service.hermes &&
+        !service.hermesStack;
+
+      const env = {
+        ...eliteFileEnv,
+        BROWSER: 'none',
+        NODE_ENV: isPackaged ? 'production' : 'development',
+        NODE_PATH: path.join(ROOT, 'node_modules'),
+        DOTNET_BUNDLE_EXTRACT_BASE_DIR: path.join(os.tmpdir(), 'elite-agent-dotnet'),
+        PAI_HOME: paiRoot,
+        PAI_PULSE_URL: pulseApi,
+        HERMES_GATEWAY_URL: getHermesGatewayUrl(),
+        HERMES_DASHBOARD_URL: getHermesDashboardUrl(),
+        HERMES_HOME: hermesInfo.home,
+        ELITE_HERMES_RUNTIME: hermesInfo.active,
+        ELITE_HERMES_DASHBOARD_INSECURE: process.env.ELITE_HERMES_DASHBOARD_INSECURE || '1',
+        API_SERVER_ENABLED: eliteFileEnv.API_SERVER_ENABLED || 'true',
+      };
+
+      const proc = spawn(cmd, args, {
+        cwd: service.cwd,
+        shell: useShell,
+        windowsHide: true,
+        env,
+      });
+
+      proc.stdout.on('data', (data) => logProcessOutput(service.name, data));
+      proc.stderr.on('data', (data) => logProcessOutput(`${service.name}-Error`, data));
+      proc.on('error', (err) => log(`[${service.name}] FATAL Error: ${err.message}`));
+      proc.on('exit', (code) => log(`[${service.name}] Beendet mit Code ${code}`));
+
+      processes.push(proc);
+    });
+
+    await new Promise((r) => setTimeout(r, 1200));
+    await waitForFrontend(90000);
+    await setReadinessSnapshot();
+    log(`[Services] Alle Dienste wurden gestartet. Readiness=${JSON.stringify(readiness)}`);
+  } catch (err) {
+    log(`[Services] KRITISCHER FEHLER in startServices: ${err.message}\n${err.stack}`);
+  }
+}
+
+async function stopServices() {
+  log(`[Services] Beende alle Dienste (${processes.length})...`);
+  const stopping = processes.map(
+    (proc) =>
+      new Promise((resolve) => {
+        if (!proc.pid) {
+          resolve();
+          return;
+        }
+        kill(proc.pid, 'SIGKILL', () => resolve());
+      }),
+  );
+  await Promise.all(stopping);
+  processes = [];
+
+  try {
+    const hermesStop = createHermesGatewayProcess('stop', { cwd: ROOT || process.cwd() });
+    await new Promise((resolve) => {
+      hermesStop.once('exit', () => resolve());
+      hermesStop.once('error', () => resolve());
+    });
+    log('[Services] Hermes Gateway gestoppt.');
+  } catch (e) {
+    log(`[Services] Hermes stop: ${e.message}`);
+  }
+
+  try {
+    const pulseStop = createPulseProcess('stop', { cwd: ROOT });
+    await new Promise((resolve) => {
+      pulseStop.once('exit', () => resolve());
+      pulseStop.once('error', () => resolve());
+    });
+    log('[Services] PAI Pulse Daemon gestoppt.');
+  } catch (e) {
+    log(`[Services] Fehler beim Beenden von PAI Pulse: ${e.message}`);
+  }
+
+  await cleanupOldInstances();
+  readiness = {
+    backend: false,
+    hermes: false,
+    hermesDashboard: false,
+    missionControl: false,
+    frontend: false,
+    pulse: false,
+  };
+}
+
+async function restartPaiPulse() {
+  try {
+    const stopProc = createPulseProcess('stop', { cwd: ROOT || process.cwd() });
+    await new Promise((resolve) => {
+      stopProc.once('exit', resolve);
+      stopProc.once('error', resolve);
+    });
+    const startProc = createPulseProcess('start', { cwd: ROOT || process.cwd() });
+    await new Promise((resolve) => {
+      startProc.once('exit', resolve);
+      startProc.once('error', resolve);
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    readiness.pulse = await checkPulseReady();
+    return readiness.pulse;
+  } catch {
+    readiness.pulse = false;
+    return false;
+  }
+}
+
+async function getRuntimeStatus() {
+  if (!ROOT) {
+    initPaths();
+  }
+  await setReadinessSnapshot();
+  return {
+    ...readiness,
+    pulseManagerScript: getPulseManagerScript(),
+    paiHome: getPaiRoot(),
+    hermesGatewayUrl: getHermesGatewayUrl(),
+    hermesDashboardUrl: getHermesDashboardUrl(),
+    hermesRuntime: getHermesRuntimeInfo(),
+  };
+}
+
+module.exports = {
+  startServices,
+  stopServices,
+  restartPaiPulse,
+  getRuntimeStatus,
+};

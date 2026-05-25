@@ -1,0 +1,22 @@
+livekit-agents[openai,silero]
+python-dotenv
+# Offline-KI (llmMode: local) – optional, aber empfohlen
+faster-whisper>=1.0.0
+piper-tts>=1.4.0
+onnxruntime>=1.19.0
+pyttsx3>=2.90
+tavily-python
+aiohttp
+pytest
+pytest-asyncio
+pyautogui
+opencv-python
+pillow
+psutil
+numpy
+# ADA v2 capabilities (optional – Mock-Fallback wenn nicht installiert)
+build123d
+mediapipe
+python-kasa
+zeroconf
+playwright

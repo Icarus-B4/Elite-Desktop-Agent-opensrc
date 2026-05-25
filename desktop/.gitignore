@@ -1,0 +1,16 @@
+
+# Development certificate
+elite.pfx
+
+# Build output
+dist/   
+desktop/build/
+desktop/dist/
+
+# MSIX packages (200MB+ Binärdateien)
+*.msix
+~*.msix
+
+# Build-Logs
+build_log.txt
+build_msix_log.txt

@@ -1,0 +1,100 @@
+{
+  "name": "desktop",
+  "version": "1.4.0",
+  "license": "MIT",
+  "description": "Elite Desktop Agent - Jarvis HUD",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "cross-env NODE_ENV=development electron .",
+    "init-win": "winapp init",
+    "build": "electron-builder build --win --x64 --dir",
+    "build:msix": "cd ../frontend && yarn run build && cd ../desktop && yarn run build && node ../scripts/msix-stage-resources.mjs && yarn winapp package C:/Users/ed/AppData/Local/Temp/elite-build/dist/win-unpacked --manifest Package.appxmanifest --executable EliteAgent.exe --cert ../devcert.pfx --cert-password jarvis123 --output \"Elite Desktop Agent 1.4.0.msix\" --verbose",
+    "pack": "yarn run build:msix"
+  },
+  "build": {
+    "appId": "org.webstark.elite",
+    "productName": "Elite Desktop Agent",
+    "executableName": "EliteAgent",
+    "copyright": "Copyright © 2026 Elite",
+    "directories": {
+      "output": "C:/Users/ed/AppData/Local/Temp/elite-build/dist"
+    },
+    "asar": true,
+    "extraResources": [
+      {
+        "from": "../package.json",
+        "to": "package.json"
+      },
+      {
+        "from": "../lib",
+        "to": "lib"
+      },
+      {
+        "from": "../backend",
+        "to": "backend"
+      },
+      {
+        "from": "../frontend",
+        "to": "frontend",
+        "filter": [
+          "**/*",
+          "!.next",
+          "!node_modules/.bin",
+          "!node_modules/.cache"
+        ]
+      },
+      {
+        "from": "Assets",
+        "to": "Assets"
+      }
+    ],
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "runAfterFinish": true,
+      "shortcutName": "Elite Agent"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "Assets/app.ico"
+    },
+    "files": [
+      "main.js",
+      "services.js",
+      "env-bootstrap.js",
+      "pai-runtime.js",
+      "hermes-runtime.js",
+      "docker-bootstrap.js",
+      "win-autostart.js",
+      "tray.js",
+      "elite-bridge.js",
+      "log-window.js",
+      "widget-window.js",
+      "preload.js",
+      "fallback.html",
+      "Assets/**/*",
+      "package.json",
+      "!dist",
+      "!.winapp",
+      "!*.msix",
+      "!build_msix_log.txt",
+      "!build_log.txt"
+    ]
+  },
+  "dependencies": {
+    "electron-is-dev": "^3.0.1",
+    "tree-kill": "^1.2.2"
+  },
+  "devDependencies": {
+    "@microsoft/winappcli": "^0.3.1",
+    "cross-env": "^10.1.0",
+    "electron": "^42.0.1",
+    "electron-builder": "^26.8.1",
+    "graceful-fs": "^4.2.11"
+  }
+}

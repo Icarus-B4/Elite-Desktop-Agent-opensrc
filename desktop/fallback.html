@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Elite – Initialisiere Dienste...</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      color: #e0f7ff;
+      background: transparent;
+    }
+    .wrap {
+      min-height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+      background: rgba(0, 11, 26, 0.92);
+      backdrop-filter: blur(32px);
+      border: 1px solid rgba(0, 242, 255, 0.15);
+      border-radius: 24px;
+    }
+    .card { max-width: 520px; text-align: center; }
+    .loader {
+      width: 48px;
+      height: 48px;
+      border: 3px solid rgba(0, 242, 255, 0.1);
+      border-radius: 50%;
+      display: inline-block;
+      border-top-color: #00f2ff;
+      animation: rotation 1s linear infinite;
+      margin-bottom: 2rem;
+    }
+    @keyframes rotation {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    h1 {
+      font-size: 1.5rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #00f2ff;
+      margin-bottom: 1.5rem;
+      text-shadow: 0 0 20px rgba(0, 242, 255, 0.4);
+    }
+    p { line-height: 1.6; color: rgba(255,255,255,0.8); margin-bottom: 1.5rem; font-size: 1.1rem; }
+    .status {
+      padding: 1rem;
+      background: rgba(0,242,255,0.05);
+      border: 1px solid rgba(0,242,255,0.1);
+      border-radius: 12px;
+      font-size: 0.9rem;
+      color: #00f2ff;
+      margin-bottom: 1.5rem;
+    }
+    button {
+      padding: 0.75rem 2rem;
+      border: none;
+      border-radius: 12px;
+      background: #00f2ff;
+      color: #000b1a;
+      font-weight: 700;
+      cursor: pointer;
+      letter-spacing: 0.05em;
+      transition: all 0.2s ease;
+    }
+    button:hover { 
+      filter: brightness(1.1);
+      transform: scale(1.05);
+      box-shadow: 0 0 20px rgba(0, 242, 255, 0.3);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="loader"></div>
+      <h1>Elite System Core</h1>
+      <p>Initialisiere Backend-Dienste und HUD-Frontend...</p>
+      <div class="status">
+        Warte auf localhost:3000 (Next.js Server)
+      </div>
+      <p style="font-size: 0.85rem; color: rgba(255,255,255,0.5);">
+        Falls dieser Bildschirm länger als 60 Sekunden erscheint, prüfe bitte die <code>service_manager.log</code> im App-Datenverzeichnis.
+      </p>
+      <button id="restartBtn" onclick="handleRestart()">Dienste neu starten & prüfen</button>
+    </div>
+  </div>
+  <script>
+    function handleRestart() {
+      const btn = document.getElementById('restartBtn');
+      btn.innerText = 'Initialisiere...';
+      btn.disabled = true;
+      btn.style.opacity = '0.5';
+      
+      if (window.eliteAPI) {
+        window.eliteAPI.restartServices();
+      }
+      
+      // Nach 5 Sekunden prüfen, ob es wieder geht
+      setTimeout(() => {
+        location.reload();
+      }, 5000);
+    }
+
+    // Automatischer Reload alle 10 Sekunden um den Status zu prüfen
+    setTimeout(() => {
+      location.reload();
+    }, 10000);
+  </script>
+</body>
+</html>

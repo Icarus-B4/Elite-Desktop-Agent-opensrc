@@ -1,0 +1,28 @@
+{
+  "name": "elite-desktop-agent-root",
+  "version": "1.2.0",
+  "license": "MIT",
+  "description": "Elite Desktop Agent (Jarvis Edition) - High-End Desktop Automation Hub",
+  "scripts": {
+    "start:hermes": "hermes gateway start",
+    "start:backend": "cd backend && python agent.py dev",
+    "start:analyzer": "cd backend && python frame_analyzer.py",
+    "start:frontend": "cd frontend && yarn run dev",
+    "start:ui-automation": "\"lib\\automation\\UiAutomationGRPC.Server.exe\"",
+    "start:core": "yarn concurrently \"yarn run start:backend\" \"yarn run start:analyzer\" \"yarn run start:ui-automation\"",
+    "start:all": "yarn concurrently \"yarn run start:backend\" \"yarn run start:analyzer\" \"yarn run start:frontend\" \"yarn run start:ui-automation\"",
+    "migrate:hermes": "node ./scripts/migrate-elite-to-hermes.mjs",
+    "install:hermes:wsl": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-hermes-wsl.ps1",
+    "sync:hermes-pai": "node ./scripts/sync-hermes-pai-bridge.mjs",
+    "test:pai-smoke": "node ./scripts/pai-smoke-check.mjs"
+  },
+  "dependencies": {
+    "concurrently": "^8.2.2",
+    "graceful-fs": "^4.2.11"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0",
+    "electron": "^42.0.1",
+    "next": "14.2.3"
+  }
+}

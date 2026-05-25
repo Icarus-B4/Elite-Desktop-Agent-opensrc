@@ -1,0 +1,13 @@
+
+- [2026-05-10 16:17] [PREFERENCES] Der Nutzer bevorzugt den Brave Browser.
+- [2026-05-10 18:12] [SYSTEM] Der Nutzer verwendet ein lokales Webinterface unter http://localhost:3002 mit dem Elite Desktop Agent und diagnostischem Live-Feed.
+- [2026-05-10 18:12] [SYSTEM] Der Nutzer hat einen Code-Editor (wahrscheinlich Visual Studio Code) offen, mit Dateien wie todo.py und capture_camera.py im Projekt Elite-Desktop-Agent.
+- [2026-05-10 18:12] [SYSTEM] Der Nutzer hat im Ordner Downloads verschiedene Dateitypen, darunter PDFs, Bilder und ausführbare Dateien.
+- [2026-05-10 18:12] [PREFERENCES] Der Nutzer verwendet eine dunkle Desktop-Oberfläche mit strukturierter Anordnung der Fenster: Browser links, Dateimanager mittig, Code-Editor rechts, Taskleiste unten.
+- [2026-05-11 18:49] [SYSTEM] Auf dem Desktop laufen häufig ein Browser mit einer futuristischen Benutzeroberfläche, die System-Diagnoseinformationen zeigt, und Visual Studio Code mit Projektdateien wie SOUL.md.
+- [2026-05-12 21:24] [SYSTEM] Der Discord-Testkanal benötigt einen gültigen Webhook oder eine Fehlerbehebung. Der letzte Versuch, eine Testnachricht zu senden, ist fehlgeschlagen.
+- [2026-05-14 13:55] [SYSTEM] Der Nutzer hat kein Spotify Premium. Musik-Steuerung erfolgt daher primär über die lokale Musikbibliothek (C:\Users\ed\Music) oder YouTube (youtube_search_ui). Spotify wird nur über UI-Automatisierung (media_control) gesteuert.
+- [2026-05-14 14:01] [SYSTEM] Die korrekte URL lautet: https://www.zatto.com (mit zwei t und zwei o).
+- [2026-05-14 14:03] [SYSTEM] Die korrekte URL lautet: https://www.zattoo.com (mit zwei t und zwei o).
+- [2026-05-15 22:06] [WORKFLOW] Korrektur: Elite soll sich die Aussage merken, dass die dritte Brust entfernt wurde und das Leben des Nutzers sich dadurch verändert hat.
+- [2026-05-15 22:19] [PREFERENCES] Spracheingabe-Erkennung anpassen: Dominante Hintergrundgeräusche oder Kommentartöne bei Sportsendungen zukünftig ignorieren.

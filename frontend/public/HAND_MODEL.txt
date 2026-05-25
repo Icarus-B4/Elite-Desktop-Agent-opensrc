@@ -1,0 +1,5 @@
+hand_landmarker.task ist installiert (Google MediaPipe, ~7.6 MB).
+
+Quelle: https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task
+
+Bei Update: Datei erneut nach frontend/public/hand_landmarker.task laden.

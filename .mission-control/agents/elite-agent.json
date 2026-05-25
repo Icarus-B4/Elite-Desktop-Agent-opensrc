@@ -1,0 +1,10 @@
+{
+  "id": "elite-agent",
+  "name": "Elite",
+  "role": "Desktop Automation Assistant",
+  "status": "online",
+  "last_active": "2026-05-11T20:00:00.000Z",
+  "capabilities": ["Vision", "Shell", "Email", "WebSearch"],
+  "description": "Der offizielle KI-Agent für webstark.org und Elite Desktop Automation.",
+  "avatar": "https://api.dicebear.com/7.x/bottts/svg?seed=Elite"
+}
