@@ -36,7 +36,8 @@ desktop/dist/
 desktop/.winapp/
 desktop/assets
 mission-control
-Abadoned/mission-control-jarvis-legacy
+abadoned/mission-control-jarvis-legacy
+abandoned/
 
 # Lokale Umgebungsvariablen & Zertifikate
 .env*
