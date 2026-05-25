@@ -1,7 +1,7 @@
-# 🤖 Elite Desktop Agent (Jarvis Edition)
+# 🤖 Elite Desktop Agent (Hermes/Jarvis Hybrid-Edition)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Elite%20Agent-Jarvis%20Edition-cyan?style=for-the-badge&logo=openai" alt="Elite Desktop Agent Badge" />
+  <img src="https://img.shields.io/badge/Elite%20Agent-Hermes/Jarvis%20Hybrid-Edition-cyan?style=for-the-badge&logo=openai" alt="Elite Desktop Agent Badge" />
   <img src="https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows" alt="Platform Badge" />
   <img src="https://img.shields.io/badge/Frontend-Next.js-black?style=for-the-badge&logo=next.js" alt="Frontend Badge" />
   <img src="https://img.shields.io/badge/Backend-Python%20%7C%20LiveKit-blue?style=for-the-badge&logo=python" alt="Backend Badge" />

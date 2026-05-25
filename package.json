@@ -2,7 +2,7 @@
   "name": "elite-desktop-agent-root",
   "version": "1.2.0",
   "license": "MIT",
-  "description": "Elite Desktop Agent (Jarvis Edition) - High-End Desktop Automation Hub",
+  "description": "Elite Desktop Agent (Hermes/Jarvis Hybrid-Edition) - High-End Desktop Automation Hub",
   "scripts": {
     "start:hermes": "hermes gateway start",
     "start:backend": "cd backend && python agent.py dev",
