@@ -5,6 +5,8 @@ const {
   session,
   globalShortcut,
   net,
+  shell,
+  ipcMain,
 } = require('electron');
 const path = require('path');
 
@@ -202,6 +204,26 @@ function createWindow() {
 
   attachRendererLogging(mainWindow);
 
+  // ── Externe Navigation: OAuth/CAPTCHA-Links im System-Browser öffnen ──
+  const ALLOWED_INTERNAL = ['127.0.0.1:3000', '127.0.0.1:8642', '127.0.0.1:9119', 'localhost'];
+  const isExternalUrl = (url) => url.startsWith('http') && !ALLOWED_INTERNAL.some(h => url.includes(h));
+
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (isExternalUrl(url)) {
+      event.preventDefault();
+      shell.openExternal(url);
+      console.log(`[Main] Externer Link (will-navigate): ${url}`);
+    }
+  });
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isExternalUrl(url)) {
+      shell.openExternal(url);
+      console.log(`[Main] Externes Fenster: ${url}`);
+    }
+    return { action: 'deny' };
+  });
+
   loadHud(mainWindow).catch((err) => {
     console.error('[Main] loadHud Fehler:', err);
     mainWindow?.loadFile(FALLBACK_HTML);
@@ -317,7 +339,14 @@ app.whenReady().then(async () => {
   });
 });
 
-const { ipcMain } = require('electron');
+ipcMain.handle('elite-open-external', async (_event, url) => {
+  if (typeof url === 'string' && url.startsWith('http')) {
+    shell.openExternal(url);
+    console.log(`[Main] IPC-open-external: ${url}`);
+    return { ok: true };
+  }
+  return { ok: false, error: 'invalid url' };
+});
 
 ipcMain.on('restart-services', async () => {
   console.log('[IPC] Restarting services...');

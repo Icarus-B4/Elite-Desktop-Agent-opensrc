@@ -175,34 +175,95 @@ def normalize_transcript(transcript: str) -> str:
     t = re.sub(r"\s+", " ", t).strip()
 
     # 1. Sichere Wake-Words (werden immer normalisiert)
-    t = _replace_wake_aliases(t, ("elite", "elit", "ellit"), "elite")
-    t = _replace_wake_aliases(t, ("jarvis", "jarvies", "jarvie", "dschawis", "dschavis"), "jarvis")
+    t = _replace_wake_aliases(
+        t,
+        (
+            "elite",
+            "elit",
+            "ellit",
+            "elli",
+            "eli",
+            "ellie",
+            "elites",
+            "elitä",
+            "elita",
+            "ellitä",
+            "alight",
+            "alite",
+            "ernie",
+            "erni",
+            "erny",
+        ),
+        "elite",
+    )
+    t = _replace_wake_aliases(
+        t,
+        (
+            "jarvis",
+            "jarvies",
+            "jarvie",
+            "dschawis",
+            "dschavis",
+            "dscharvis",
+            "travis",
+            "yaris",
+            "jervis",
+        ),
+        "jarvis",
+    )
 
     # 2. Riskante Wake-Words (phonetische Fehlhörer, die leicht im TV oder Hintergrund fallen)
     # Diese werden NUR normalisiert, wenn ein klarer Befehls- oder Medienkontext vorliegt.
     has_cmd_context = (
         any(t.startswith(s) or f" {s}" in t for s in IMPERATIVE_STARTERS)
-        or any(marker in t for marker in (
-            "öffne", "oeffne", "öffnet", "zattoo", "saturn", "pro sieben", "prosieben", "pro7", "pro 7",
-            "spiel", "play", "pause", "stopp", "halt", "ruhe", "schließe", "minimieren",
-            "lauter", "leiser", "musik", "song", "wetter", "licht", "lampe", "steckdose", "kasa",
-            "zeig", "show", "editor", "schreibe", "kopiere", "clipboard", "erneut", "nochmal"
-        ))
+        or any(
+            marker in t
+            for marker in (
+                "öffne",
+                "oeffne",
+                "öffnet",
+                "zattoo",
+                "saturn",
+                "pro sieben",
+                "prosieben",
+                "pro7",
+                "pro 7",
+                "spiel",
+                "play",
+                "pause",
+                "stopp",
+                "halt",
+                "ruhe",
+                "schließe",
+                "minimieren",
+                "lauter",
+                "leiser",
+                "musik",
+                "song",
+                "wetter",
+                "licht",
+                "lampe",
+                "steckdose",
+                "kasa",
+                "zeig",
+                "show",
+                "editor",
+                "schreibe",
+                "kopiere",
+                "clipboard",
+                "erneut",
+                "nochmal",
+            )
+        )
     )
 
     if has_cmd_context:
-        # Riskante Elite-Fehlhörer
+        # Sehr riskante Elite-Fehlhörer
+        t = _replace_wake_aliases(t, ("light", "lite", "aly", "allie"), "elite")
+        # Sehr riskante Jarvis-Fehlhörer
         t = _replace_wake_aliases(
             t,
-            ("elli", "eli", "ellie", "aly", "allie", "elites", "alight", "alite", "light", "lite"),
-            "elite",
-        )
-        # Ernie/Erni/Erny
-        t = _replace_wake_aliases(t, ("ernie", "erni", "erny"), "elite")
-        # Riskante Jarvis-Fehlhörer
-        t = _replace_wake_aliases(
-            t,
-            ("travis", "yaris", "arvis", "jervis", "charvis", "java", "davis", "charles", "charly"),
+            ("arvis", "charvis", "java", "davis", "charles", "charly"),
             "jarvis",
         )
 
@@ -247,10 +308,11 @@ def _phrase_has_word(text: str, phrase: str) -> bool:
 
 def transcript_accepted(transcript: str, va_mode: int) -> bool:
     """Wake-word (modes 0/3) or wake-word + clear imperative (modes 1/2)."""
-    t = normalize_transcript(transcript)
+    corrected = apply_german_stt_corrections(transcript)
+    t = normalize_transcript(corrected)
     if not t:
         return False
-    if transcript_has_wake_word(transcript):
+    if transcript_has_wake_word(corrected):
         return True
     if va_mode in (0, 3):
         return False
@@ -522,7 +584,7 @@ class WebstarkAgent(Agent):
             "Widget-IDs: cad, printer, browserAgent, kasa, authLock.\n"
         )
         extra_instructions = (
-            " Du schweigst, wenn du nicht angesprochen wirst. Du lachst nicht, du nickst nicht, du atmest nicht. "
+            "Du schweigst, wenn du nicht angesprochen wirst. Du lachst nicht, du nickst nicht, du atmest nicht. "
             "Kein 'ich bin hier', kein 'verstanden', kein 'bereit für den nächsten Befehl'. "
             "Starte niemals selbst ein Gespräch."
         )
@@ -1066,7 +1128,7 @@ async def entrypoint(ctx: JobContext):
                 if not cfg.get("startupVoiceGreeting", True):
                     return
 
-                greeting_text = build_startup_greeting(
+                greeting_text = await build_startup_greeting(
                     user_name,
                     elite_ready=True,
                     effective_llm_mode=llm_mode,

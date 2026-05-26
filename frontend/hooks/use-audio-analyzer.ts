@@ -24,13 +24,52 @@ export function useAudioAnalyzer(track: any) {
   const animationRef = useRef<number>(undefined);
   const analyzerRef = useRef<AnalyserNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const lastTrackRef = useRef<any>(null);
+  const lastTrackIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!track) return;
+    // Wenn kein Track übergeben wurde, aufräumen und Pegel zurücksetzen
+    if (!track) {
+      lastTrackIdRef.current = null;
+      if (sourceRef.current) {
+        try {
+          sourceRef.current.disconnect();
+        } catch (_) {}
+        sourceRef.current = null;
+      }
+      analyzerRef.current = null;
+      setLevels(new Array(8).fill(0));
+      return;
+    }
+
+    // MediaStreamTrack extrahieren
+    let rawTrack: MediaStreamTrack | null = null;
+
+    if (track instanceof MediaStreamTrack) {
+      // Direkt von getUserMedia
+      rawTrack = track;
+    } else if (track.mediaStreamTrack) {
+      // LiveKit Track-Objekt
+      rawTrack = track.mediaStreamTrack;
+    }
+
+    if (!rawTrack || rawTrack.readyState === 'ended') {
+      console.log('[AudioAnalyzer] Track nicht bereit:', rawTrack?.readyState);
+      lastTrackIdRef.current = null;
+      if (sourceRef.current) {
+        try {
+          sourceRef.current.disconnect();
+        } catch (_) {}
+        sourceRef.current = null;
+      }
+      analyzerRef.current = null;
+      setLevels(new Array(8).fill(0));
+      return;
+    }
+
+    const trackId = rawTrack.id;
     // Vermeidung doppelter Verbindungen zum selben Track
-    if (track === lastTrackRef.current) return;
-    lastTrackRef.current = track;
+    if (trackId === lastTrackIdRef.current) return;
+    lastTrackIdRef.current = trackId;
 
     const context = getAudioContext();
     if (!context) return;
@@ -39,22 +78,6 @@ export function useAudioAnalyzer(track: any) {
     }
 
     try {
-      // MediaStreamTrack extrahieren
-      let rawTrack: MediaStreamTrack | null = null;
-
-      if (track instanceof MediaStreamTrack) {
-        // Direkt von getUserMedia
-        rawTrack = track;
-      } else if (track.mediaStreamTrack) {
-        // LiveKit Track-Objekt
-        rawTrack = track.mediaStreamTrack;
-      }
-
-      if (!rawTrack || rawTrack.readyState === 'ended') {
-        console.log('[AudioAnalyzer] Track nicht bereit:', rawTrack?.readyState);
-        return;
-      }
-
       console.log(
         '[AudioAnalyzer] Verbinde:',
         rawTrack.kind,

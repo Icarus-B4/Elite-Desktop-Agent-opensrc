@@ -273,6 +273,7 @@ function LiveKitPageContent() {
   const [showSettings, setShowSettings] = useState(false);
   const [livekitMode, setLivekitMode] = useState<'cloud' | 'local'>('cloud');
   const [llmMode, setLlmMode] = useState<'cloud' | 'local' | 'auto'>('auto');
+  const [voiceAssistantMode, setVoiceAssistantMode] = useState<number>(0);
   const [effectiveLlmMode, setEffectiveLlmMode] = useState<'cloud' | 'local' | null>(null);
   const [llmFallbackReason, setLlmFallbackReason] = useState<string | null>(null);
   const [ollamaReachable, setOllamaReachable] = useState(false);
@@ -306,8 +307,8 @@ function LiveKitPageContent() {
     return () => clearInterval(interval);
   }, []);
 
-  // Load livekitMode
-  useEffect(() => {
+  // Load settings
+  const loadSettings = useCallback(() => {
     fetch('/api/elite/settings')
       .then(res => res.json())
       .then(data => {
@@ -317,10 +318,23 @@ function LiveKitPageContent() {
         if (data.llmMode) {
           setLlmMode(data.llmMode);
         }
+        if (data.voiceAssistant !== undefined) {
+          setVoiceAssistantMode(data.voiceAssistant);
+        }
         setOllamaReachable(!!data.ollamaReachable);
       })
       .catch(err => console.error("Error loading settings:", err));
   }, []);
+
+  useEffect(() => {
+    loadSettings();
+  }, [loadSettings]);
+
+  // Settings updated listener
+  useEffect(() => {
+    window.addEventListener('elite-settings-updated', loadSettings);
+    return () => window.removeEventListener('elite-settings-updated', loadSettings);
+  }, [loadSettings]);
 
   // Face Auth bei manuellem App-Start prüfen
   useEffect(() => {
@@ -422,8 +436,25 @@ function LiveKitPageContent() {
         event.preventDefault();
       }
     };
+
+    const handleRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      const errorMsg = reason?.message || String(reason) || "";
+      const errorName = reason?.name || "";
+      
+      if (errorMsg.includes('DataStreamError') || errorName === 'DataStreamError') {
+        console.warn('[LiveKit] DataStreamError (Promise Rejection) abgefangen. Unterdrücke UI-Crash.');
+        addLog({ type: 'system', message: 'Verbindung zum Agenten unterbrochen. Warte auf Reconnect...' });
+        event.preventDefault();
+      }
+    };
+
     window.addEventListener('error', handleError);
-    return () => window.removeEventListener('error', handleError);
+    window.addEventListener('unhandledrejection', handleRejection);
+    return () => {
+      window.removeEventListener('error', handleError);
+      window.removeEventListener('unhandledrejection', handleRejection);
+    };
   }, [addLog]);
 
   const onConnect = useCallback(async () => {
@@ -761,6 +792,7 @@ function LiveKitPageContent() {
                   setShowSettings={setShowSettings}
                   livekitMode={livekitMode}
                   llmMode={llmMode}
+                  voiceAssistantMode={voiceAssistantMode}
                 />
                 <RoomAudioRenderer />
               </LiveKitRoom>
@@ -1171,6 +1203,10 @@ function LiveKitBridge() {
             typeof data.transcript === 'string' && data.transcript.trim()
               ? `Gehört: „${data.transcript.trim()}“ — `
               : '';
+          
+          // Dispatch global event for the chat filter
+          window.dispatchEvent(new CustomEvent('elite-voice-rejected', { detail: data }));
+
           showToast({
             type: 'system',
             title: 'Sprache gehört – kein Wake-Word',
@@ -1437,6 +1473,7 @@ function SupportInterface({
   setShowSettings,
   livekitMode,
   llmMode,
+  voiceAssistantMode,
 }: { 
   isHardwareInitializing: boolean, 
   setIsHardwareInitializing: (v: boolean) => void,
@@ -1444,12 +1481,12 @@ function SupportInterface({
   setShowSettings: (v: boolean) => void,
   livekitMode: 'cloud' | 'local',
   llmMode: 'cloud' | 'local' | 'auto',
+  voiceAssistantMode: number,
 }) {
   const connectionState = useConnectionState();
   const { state, agent, audioTrack: agentTrack } = useVoiceAssistant();
   const statusLabel = agentStatusLabel(state, connectionState, !!agent);
   const [micLive, setMicLive] = useState(false);
-  const [inputLevel, setInputLevel] = useState(0);
   const { chatMessages, send } = useChat();
   const transcriptions = useTranscriptions();
   const [inputText, setInputText] = useState('');
@@ -1461,6 +1498,24 @@ function SupportInterface({
   const [hermesSessionId, setHermesSessionId] = useState<string | null>(null);
   const [hermesSending, setHermesSending] = useState(false);
   const hermesApiHistoryRef = useRef<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
+  const [rejectedTranscripts, setRejectedTranscripts] = useState<Set<string>>(new Set());
+
+  // Listen to voice rejections from the backend to clean up chat transcripts
+  useEffect(() => {
+    const handleVoiceRejected = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      const transcript = detail?.transcript;
+      if (typeof transcript === 'string' && transcript.trim()) {
+        setRejectedTranscripts((prev) => {
+          const next = new Set(prev);
+          next.add(transcript.trim().toLowerCase());
+          return next;
+        });
+      }
+    };
+    window.addEventListener('elite-voice-rejected', handleVoiceRejected);
+    return () => window.removeEventListener('elite-voice-rejected', handleVoiceRejected);
+  }, []);
   
   // Bestimmt, ob Widgets aktiv sind, die Platz im Zentrum beanspruchen (Sidebars ausblenden)
   // Die Webcam und Pop-outs werden hier ignoriert, da sie keinen Platz im Zentrum beanspruchen.
@@ -1586,7 +1641,27 @@ function SupportInterface({
       const identity = segment.participantInfo?.identity ?? 'unknown';
       const isAgent = identity.includes('agent');
       const text = fixUmlauts(segment.text);
-      if (!isAgent && isPhantomTranscript(text)) return;
+      
+      if (!isAgent) {
+        if (isPhantomTranscript(text)) return;
+
+        // 1. Filter out already rejected transcripts
+        const trimmedLower = text.trim().toLowerCase();
+        if (rejectedTranscripts.has(trimmedLower)) return;
+        if (Array.from(rejectedTranscripts).some(rejected => 
+          trimmedLower.includes(rejected) || rejected.includes(trimmedLower)
+        )) {
+          return;
+        }
+
+        // 2. Filter out transcripts that lack a wake word if we are in wake-word mode (0 or 3)
+        if (voiceAssistantMode === 0 || voiceAssistantMode === 3) {
+          const hasWakeWord = trimmedLower.includes('elite') || 
+                              trimmedLower.includes('elit') || 
+                              trimmedLower.includes('jarvis');
+          if (!hasWakeWord) return;
+        }
+      }
 
       const segMeta = segment as {
         firstReceivedTime?: number;
@@ -1640,7 +1715,7 @@ function SupportInterface({
     }
 
     return deduplicated;
-  }, [chatMessages, transcriptions, savedMessages, hermesMessages, isCleared, fixUmlauts]);
+  }, [chatMessages, transcriptions, savedMessages, hermesMessages, isCleared, fixUmlauts, rejectedTranscripts, voiceAssistantMode]);
 
   // Neue Nachrichten automatisch in localStorage speichern (nicht wenn gerade gelöscht)
   useEffect(() => {
@@ -1755,35 +1830,14 @@ function SupportInterface({
     return track ?? null;
   }, [agentTrack]);
 
-  // USER AUDIO: LiveKit Mic-Track finden und KLONEN
-  // Der originale Track gehört WebRTC, deshalb klonen wir ihn
-  // für eine unabhängige Audio-Analyse.
-  // USER AUDIO: LiveKit Mic-Track finden und KLONEN (Nur wenn aktiv!)
+  // USER AUDIO: LiveKit Mic-Track finden (direkte passive Analyse des Tracks ohne Klonen, um eine Klon-Schleife zu vermeiden)
   const allMicTracks = useTracks([Track.Source.Microphone], { onlySubscribed: false });
-  const [clonedMicTrack, setClonedMicTrack] = useState<MediaStreamTrack | null>(null);
-
-  useEffect(() => {
-    const localRef = allMicTracks.find(t => t.participant.isLocal);
-    const livekitTrack = localRef?.publication?.track;
-
-    if (livekitTrack?.mediaStreamTrack && livekitTrack.mediaStreamTrack.readyState === 'live') {
-      // Klon nur erstellen, wenn der Track wirklich aktiv ist
-      const clone = livekitTrack.mediaStreamTrack.clone();
-      console.log('[Audio] Mic-Track geklont für Visualizer:', clone.label);
-      setClonedMicTrack(clone);
-
-      return () => {
-        clone.stop();
-        setClonedMicTrack(null);
-      };
-    } else {
-      setClonedMicTrack(null);
-    }
-  }, [allMicTracks]);
+  const localRef = allMicTracks.find(t => t.participant.isLocal);
+  const livekitTrack = localRef?.publication?.track ?? null;
 
   // Audio-Analyse für beide Quellen
   const agentAudio = useAudioAnalyzer(agentMediaTrack);
-  const userAudio = useAudioAnalyzer(clonedMicTrack);
+  const userAudio = useAudioAnalyzer(livekitTrack);
 
   // Kombinierte Levels für den 3D-Orb (Maximum beider Quellen)
   const combinedLevels = useMemo(() => {
@@ -2007,7 +2061,6 @@ function SupportInterface({
       {/* Visualizer Hero: Orb – dynamisch nach rechts unten wenn Widgets aktiv */}
       <OrbSection
         levels={combinedLevels}
-        inputLevel={inputLevel}
         agentState={state}
         paused={isHardwareInitializing}
       />
@@ -2177,7 +2230,6 @@ function SupportInterface({
             isInitializing={isHardwareInitializing}
             setIsInitializing={setIsHardwareInitializing}
             onMicLiveChange={setMicLive}
-            onInputLevelChange={setInputLevel}
           />
         }
       />
@@ -2202,12 +2254,10 @@ function SupportInterface({
  */
 function OrbSection({
   levels,
-  inputLevel = 0,
   agentState,
   paused = false,
 }: {
   levels: number[];
-  inputLevel?: number;
   agentState: string;
   paused?: boolean;
 }) {
@@ -2270,7 +2320,7 @@ function OrbSection({
 
   // Standard: großer, zentrierter Orb
   const avgLevel = levels.length ? levels.reduce((a, b) => a + b, 0) / levels.length : 0;
-  const signalPct = Math.min(100, Math.max(avgLevel, inputLevel / 100, ...levels) * 140);
+  const signalPct = Math.min(100, Math.max(avgLevel, ...levels) * 140);
 
   return (
     <motion.section
@@ -2460,7 +2510,9 @@ function CustomVoiceControls({
       : 0;
 
   useEffect(() => {
-    onInputLevelChange?.(toolbarMicLevel);
+    if (onInputLevelChange) {
+      onInputLevelChange(toolbarMicLevel);
+    }
   }, [toolbarMicLevel, onInputLevelChange]);
 
   const syncMicTrack = useCallback(() => {

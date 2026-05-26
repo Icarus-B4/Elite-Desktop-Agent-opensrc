@@ -21,4 +21,5 @@ contextBridge.exposeInMainWorld('eliteAPI', {
     ipcRenderer.on('elite-widget-window-closed', handler);
     return () => ipcRenderer.removeListener('elite-widget-window-closed', handler);
   },
+  openExternal: (url) => ipcRenderer.invoke('elite-open-external', url),
 });

@@ -380,12 +380,17 @@ export function TerminalWidget() {
           />
         )}
         <div className="flex-1 min-w-0 min-h-0 relative p-1.5">
-          <div className={`w-full h-full grid gap-1.5 ${
-            activeTab.layout === 'single' ? 'grid-cols-1 grid-rows-1' :
-            activeTab.layout === 'horizontal' ? 'grid-cols-2 grid-rows-1' :
-            'grid-cols-1 grid-rows-2'
-          }`}>
-            {activeTab.panels.map((panel) => (
+          {tabs.map((tab) => (
+            <div
+              key={tab.id}
+              className={`w-full h-full gap-1.5 ${
+                tab.layout === 'single' ? 'grid-cols-1 grid-rows-1' :
+                tab.layout === 'horizontal' ? 'grid-cols-2 grid-rows-1' :
+                'grid-cols-1 grid-rows-2'
+              }`}
+              style={{ display: tab.active ? 'grid' : 'none' }}
+            >
+              {tab.panels.map((panel) => (
                 <XtermPanel
                   key={panel.id}
                   panel={panel}
@@ -395,12 +400,13 @@ export function TerminalWidget() {
                   onRegisterWriter={registerTerminalWriter}
                   onDragHover={setDropTargetPanelId}
                   onPathDrop={(rel, isDir) => insertPathIntoTerminal(rel, isDir, panel.id)}
+                  isActive={tab.active}
                   onClosePanel={
-                    activeTab.panels.length > 1
+                    tab.panels.length > 1
                       ? () => {
                           setTabs((prev) =>
                             prev.map((t) => {
-                              if (t.id !== activeTab.id) return t;
+                              if (t.id !== tab.id) return t;
                               const nextPanels = t.panels.filter((p) => p.id !== panel.id);
                               return {
                                 ...t,
@@ -414,7 +420,8 @@ export function TerminalWidget() {
                   }
                 />
               ))}
-          </div>
+            </div>
+          ))}
         </div>
       </div>
       </div>
@@ -431,6 +438,7 @@ interface XtermPanelProps {
   onDragHover: (panelId: string | null) => void;
   onPathDrop: (relativePath: string, isDirectory: boolean) => void;
   onClosePanel?: () => void;
+  isActive: boolean;
 }
 
 function XtermPanel({
@@ -442,9 +450,11 @@ function XtermPanel({
   onDragHover,
   onPathDrop,
   onClosePanel,
+  isActive,
 }: XtermPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<any>(null);
+  const fitAddonRef = useRef<any>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(true);
@@ -454,6 +464,8 @@ function XtermPanel({
     let term: any = null;
     let ws: WebSocket | null = null;
     let fitAddon: any = null;
+    let handleContextMenu: ((e: MouseEvent) => void) | null = null;
+    const container = containerRef.current;
 
     const initTerminal = async () => {
       // xterm.js dynamisch importieren (nur auf Client)
@@ -506,13 +518,67 @@ function XtermPanel({
 
       // Addons laden
       fitAddon = new FitAddon();
+      fitAddonRef.current = fitAddon;
       term.loadAddon(fitAddon);
       term.loadAddon(new SearchAddon());
-      term.loadAddon(new WebLinksAddon());
+      term.loadAddon(new WebLinksAddon(
+        typeof window !== 'undefined' && (window as any).eliteAPI?.openExternal
+          ? (event, uri) => { (window as any).eliteAPI.openExternal(uri); }
+          : undefined
+      ));
 
       // Terminal rendern
       term.open(containerRef.current);
       fitAddon.fit();
+
+      // Tastatur-Events abfangen für Copy & Paste (Ctrl+C, Ctrl+V)
+      term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+        // Ctrl+C: Nur kopieren, wenn Text selektiert ist
+        if (event.ctrlKey && event.code === 'KeyC') {
+          if (term.hasSelection()) {
+            if (event.type === 'keydown') {
+              const selectedText = term.getSelection();
+              navigator.clipboard.writeText(selectedText);
+            }
+            return false; // Verhindert SIGINT an den PTY-Server
+          }
+        }
+
+        // Ctrl+V: Aus Zwischenablage einfügen
+        if (event.ctrlKey && event.code === 'KeyV') {
+          if (event.type === 'keydown') {
+            navigator.clipboard.readText().then((text) => {
+              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.send(text);
+              }
+            });
+          }
+          return false; // Verhindert rohes Ctrl+V Senden
+        }
+
+        return true;
+      });
+
+      // Maus-Rechtsklick abfangen für klassisches Terminal-Copy/Paste (Putty/WSL Style)
+      handleContextMenu = (e: MouseEvent) => {
+        e.preventDefault();
+        if (term && term.hasSelection()) {
+          const selectedText = term.getSelection();
+          navigator.clipboard.writeText(selectedText).then(() => {
+            term.clearSelection();
+          });
+        } else {
+          navigator.clipboard.readText().then((text) => {
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.send(text);
+            }
+          });
+        }
+      };
+
+      if (container && handleContextMenu) {
+        container.addEventListener('contextmenu', handleContextMenu as EventListener);
+      }
 
       // WebGL blockiert echte Transparenz — im Pop-out Canvas-Renderer nutzen
       if (!isPopout) {
@@ -604,6 +670,9 @@ function XtermPanel({
     return () => {
       active = false;
       onRegisterWriter(panel.id, null);
+      if (container && handleContextMenu) {
+        container.removeEventListener('contextmenu', handleContextMenu as EventListener);
+      }
       if (ws) {
         ws.close();
       }
@@ -612,6 +681,30 @@ function XtermPanel({
       }
     };
   }, [panel, projectPath, isPopout, onRegisterWriter]);
+
+  useEffect(() => {
+    if (isActive && terminalRef.current) {
+      // Fokus auf das Terminal setzen für direktes Tippen nach Tab-Wechsel
+      terminalRef.current.focus();
+      
+      // fit-Event verzögert aufrufen für saubere UI-Größenanpassung
+      const timer = setTimeout(() => {
+        try {
+          if (fitAddonRef.current) {
+            fitAddonRef.current.fit();
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({
+                action: 'resize',
+                cols: terminalRef.current.cols,
+                rows: terminalRef.current.rows
+              }));
+            }
+          }
+        } catch (e) {}
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [isActive]);
 
   const handleDragOver = (e: React.DragEvent) => {
     if (!e.dataTransfer.types.includes(ELITE_FILE_DRAG_TYPE)) return;
