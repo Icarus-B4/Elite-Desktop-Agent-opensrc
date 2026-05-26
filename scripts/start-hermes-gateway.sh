@@ -68,9 +68,21 @@ ensure_dashboard_dist() {
 }
 
 # --- Dashboard (9119) ---
+# outsourc-e/hermes-workspace nutzt denselben Port — nicht mit NousResearch verwechseln
 if curl -sf -o /dev/null "http://127.0.0.1:9119/"; then
-  log "Dashboard laeuft bereits: http://127.0.0.1:9119"
-  exit 0
+  title="$(curl -sf http://127.0.0.1:9119/ 2>/dev/null | sed -n 's/.*<title>\([^<]*\)<\/title>.*/\1/p' | head -1)"
+  if [[ "${title}" == *Workspace* ]]; then
+    log "Port 9119: hermes-workspace (Fork) — stoppe, starte NousResearch-Dashboard…"
+    pkill -f "hermes-workspace.*server-entry" 2>/dev/null || true
+    if pgrep -f "server-entry.js" >/dev/null 2>&1; then
+      cwd="$(readlink -f /proc/$(pgrep -f 'server-entry.js' | head -1)/cwd 2>/dev/null || true)"
+      [[ "${cwd:-}" == *hermes-workspace* ]] && pkill -f "server-entry.js" 2>/dev/null || true
+    fi
+    sleep 2
+  else
+    log "Dashboard laeuft bereits: http://127.0.0.1:9119 (${title:-OK})"
+    exit 0
+  fi
 fi
 
 if pgrep -f "hermes dashboard" >/dev/null 2>&1; then

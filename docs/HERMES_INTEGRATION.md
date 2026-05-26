@@ -62,6 +62,36 @@ Ports **8642** / **9119** werden von WSL2 nach `127.0.0.1` weitergeleitet.
 | PAI Pulse / Observatory | 31337 | http://127.0.0.1:31337 |
 | LiveKit / Backend | 7861 | http://127.0.0.1:7861 |
 
+## Zwei verschiedene Web-UIs (wichtig)
+
+| Produkt | Repo | Port (typisch) | Erkennung im Browser |
+|---------|------|----------------|----------------------|
+| **Hermes Agent (offiziell)** | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) | **9119** | Tab-Titel: `Hermes Agent - Dashboard` |
+| **Hermes Workspace (Fork)** | [outsourc-e/hermes-workspace](https://github.com/outsourc-e/hermes-workspace) | **9119** (kollidiert!) | Tab-Titel: `Hermes Workspace` |
+
+Elite erwartet **NousResearch** auf `http://127.0.0.1:9119`. Wenn du `pnpm start` / `node server-entry.js` in `~/hermes-workspace` laufen lässt, blockiert der Fork den offiziellen Port — dann siehst du die falsche UI.
+
+**Workspace stoppen, offizielles Dashboard starten:**
+
+```bash
+wsl
+pkill -f "hermes-workspace.*server-entry" || pkill -f "server-entry.js"   # nur wenn cwd ~/hermes-workspace
+# Im Elite-Repo (Windows-Pfad → WSL):
+bash scripts/start-hermes-gateway.sh
+# oder: hermes dashboard --no-open --skip-build
+```
+
+**Release-Pin (nach falschem `hermes update` auf bleeding-edge `main`):**
+
+```bash
+cd ~/.hermes/hermes-agent
+git fetch --tags
+git checkout v2026.5.16    # v0.14.0 — offizielles Release
+source venv/bin/activate && uv pip install -e ".[web,pty]"
+```
+
+`hermes update` zieht immer `main` — für stabiles UI bewusst auf einem Tag bleiben oder nur mit Backup updaten.
+
 ## Installation in WSL (einmalig)
 
 ```bash
