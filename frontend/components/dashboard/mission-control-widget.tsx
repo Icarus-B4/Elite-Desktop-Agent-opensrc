@@ -89,7 +89,13 @@ export function MissionControlWidget() {
           '[Hermes] Dashboard (9119) offline — in WSL: hermes dashboard --no-open  oder START_JARVIS.bat neu starten',
       });
     }
-    window.open(url, '_blank', 'noopener,noreferrer');
+    // Electron: eliteAPI.openExternal nutzen (window.open wird vom setWindowOpenHandler blockiert)
+    const api = (window as any).eliteAPI;
+    if (api?.openExternal) {
+      api.openExternal(url);
+    } else {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
   };
 
   const memoryPct = data?.memory
@@ -239,7 +245,11 @@ export function MissionControlWidget() {
                 </span>
               </button>
               <button
-                onClick={() => window.open('http://127.0.0.1:31337', '_blank', 'noopener,noreferrer')}
+                onClick={() => {
+                  const api = (window as any).eliteAPI;
+                  const url = 'http://127.0.0.1:31337';
+                  if (api?.openExternal) { api.openExternal(url); } else { window.open(url, '_blank', 'noopener,noreferrer'); }
+                }}
                 className="flex items-center justify-center gap-1.5 py-2 rounded-xl bg-primary/10 ring-1 ring-primary/20 hover:bg-primary/20 transition-all"
               >
                 <Brain className="size-3 text-primary" />

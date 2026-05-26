@@ -401,7 +401,13 @@ export function PaiPulseWidget() {
 
   // PAI Dashboard im neuen Fenster öffnen (statt eingebetteten Fullscreen)
   const handleOpenInNewWindow = () => {
-    window.open(PULSE_IFRAME_URL, '_blank', 'noopener,noreferrer');
+    // Electron: eliteAPI.openExternal nutzen (window.open wird vom setWindowOpenHandler blockiert)
+    const api = (window as any).eliteAPI;
+    if (api?.openExternal) {
+      api.openExternal(PULSE_IFRAME_URL);
+    } else {
+      window.open(PULSE_IFRAME_URL, '_blank', 'noopener,noreferrer');
+    }
   };
 
   return (
