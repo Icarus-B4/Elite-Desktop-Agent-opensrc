@@ -28,8 +28,10 @@ patchConsoleForHeadless();
 const { startServices, stopServices, restartPaiPulse, getRuntimeStatus } = require('./services');
 const { setupTerminalToggle } = require('./log-window');
 const { setupWidgetWindowIpc, setMainWindow } = require('./widget-window');
+const { setupMissionControlWindowIpc } = require('./mission-control-window');
 // Sofort registrieren — Renderer-Reload (F5) darf nicht vor Handler-Setup invoke'n
 setupWidgetWindowIpc();
+setupMissionControlWindowIpc();
 const { setupTray, hideToTray, showFromTray, destroyTray } = require('./tray');
 const { startEliteBridge } = require('./elite-bridge');
 let registerAutostart = () => false;
@@ -313,6 +315,7 @@ app.whenReady().then(async () => {
   
   createWindow();
   setMainWindow(mainWindow);
+  setupMissionControlWindowIpc();
 
   setupTray({
     getWindow: () => mainWindow,

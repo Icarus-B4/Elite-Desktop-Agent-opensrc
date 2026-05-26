@@ -236,28 +236,62 @@ export function MissionControlWidget() {
 
             <div className="grid grid-cols-2 gap-2">
               <button
+                onClick={() => {
+                  const api = (
+                    window as Window & {
+                      eliteAPI?: {
+                        openMissionControl?: () => Promise<{ ok: boolean }>;
+                        openExternal?: (u: string) => void;
+                      };
+                    }
+                  ).eliteAPI;
+                  if (api?.openMissionControl) {
+                    void api.openMissionControl().catch((err: unknown) => {
+                      const msg = err instanceof Error ? err.message : String(err);
+                      addLog({
+                        type: 'system',
+                        message: msg.includes('No handler')
+                          ? '[Hermes] Mission Control: Elite/Electron komplett neu starten (main.js Handler fehlt).'
+                          : `[Hermes] Mission Control: ${msg}`,
+                      });
+                    });
+                    return;
+                  }
+                  const url = `${window.location.origin}/hermes/mission-control`;
+                  if (api?.openExternal) api.openExternal(url);
+                  else window.location.href = url;
+                }}
+                className="flex items-center justify-center gap-1.5 py-2 rounded-xl bg-cyan-500/10 ring-1 ring-cyan-500/20 hover:bg-cyan-500/20 transition-all"
+              >
+                <LayoutDashboard className="size-3 text-cyan-400" />
+                <span className="text-[9px] font-bold uppercase tracking-wider text-cyan-400">
+                  Mission Control
+                </span>
+              </button>
+              <button
                 onClick={handleOpenDashboard}
                 className="flex items-center justify-center gap-1.5 py-2 rounded-xl bg-violet-500/10 ring-1 ring-violet-500/20 hover:bg-violet-500/20 transition-all"
               >
                 <ExternalLink className="size-3 text-violet-400" />
                 <span className="text-[9px] font-bold uppercase tracking-wider text-violet-400">
-                  Dashboard
-                </span>
-              </button>
-              <button
-                onClick={() => {
-                  const api = (window as any).eliteAPI;
-                  const url = 'http://127.0.0.1:31337';
-                  if (api?.openExternal) { api.openExternal(url); } else { window.open(url, '_blank', 'noopener,noreferrer'); }
-                }}
-                className="flex items-center justify-center gap-1.5 py-2 rounded-xl bg-primary/10 ring-1 ring-primary/20 hover:bg-primary/20 transition-all"
-              >
-                <Brain className="size-3 text-primary" />
-                <span className="text-[9px] font-bold uppercase tracking-wider text-primary">
-                  PAI Pulse
+                  Hermes UI
                 </span>
               </button>
             </div>
+            <button
+              onClick={() => {
+                const api = (window as Window & { eliteAPI?: { openExternal?: (u: string) => void } }).eliteAPI;
+                const url = 'http://127.0.0.1:31337';
+                if (api?.openExternal) api.openExternal(url);
+                else window.open(url, '_blank', 'noopener,noreferrer');
+              }}
+              className="flex w-full items-center justify-center gap-1.5 py-2 mt-2 rounded-xl bg-primary/10 ring-1 ring-primary/20 hover:bg-primary/20 transition-all"
+            >
+              <Brain className="size-3 text-primary" />
+              <span className="text-[9px] font-bold uppercase tracking-wider text-primary">
+                PAI Pulse
+              </span>
+            </button>
 
             {userPct > 0 && (
               <div className={`${WIDGET_LIST_ROW_CLASS} justify-between`}>

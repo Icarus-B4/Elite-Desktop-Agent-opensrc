@@ -14,7 +14,10 @@
     "migrate:hermes": "node ./scripts/migrate-elite-to-hermes.mjs",
     "install:hermes:wsl": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-hermes-wsl.ps1",
     "sync:hermes-pai": "node ./scripts/sync-hermes-pai-bridge.mjs",
-    "test:pai-smoke": "node ./scripts/pai-smoke-check.mjs"
+    "test:pai-smoke": "node ./scripts/pai-smoke-check.mjs",
+    "setup:hermes-mission-control": "python scripts/hermes_mission_control_bootstrap.py",
+    "setup:hermes-mission-control:smoke": "python scripts/hermes_mission_control_bootstrap.py --smoke-test",
+    "setup:hermes-mission-control:cron": "python scripts/hermes_mission_control_bootstrap.py --install-cron"
   },
   "dependencies": {
     "concurrently": "^8.2.2",

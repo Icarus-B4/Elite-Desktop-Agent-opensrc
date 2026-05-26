@@ -220,6 +220,22 @@ body.elite-widget-popout #__next {
   min-height: 0 !important;
 }
 
+/* Hermes Mission Control — full-page scroll (Electron + Browser) */
+html.elite-mission-control,
+html.elite-mission-control body {
+  overflow: auto !important;
+  overflow-x: hidden !important;
+  height: auto !important;
+  min-height: 100vh !important;
+  background: #15151f !important;
+}
+
+html.elite-mission-control #__next {
+  min-height: 100vh !important;
+  height: auto !important;
+  overflow: visible !important;
+}
+
 @import "@xterm/xterm/css/xterm.css";
 
 /* Gleiche Fläche wie Elite-Hauptfenster (#elite-window-shell, Electron) */

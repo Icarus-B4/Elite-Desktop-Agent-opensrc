@@ -75,6 +75,7 @@
       "elite-bridge.js",
       "log-window.js",
       "widget-window.js",
+      "mission-control-window.js",
       "preload.js",
       "fallback.html",
       "Assets/**/*",
