@@ -1,4 +1,8 @@
 @echo off
+if not "%~1"=="min" (
+  powershell.exe -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList 'min' -WindowStyle Minimized"
+  exit /b 0
+)
 setlocal EnableExtensions
 title ELITE AGENT - SYSTEM CORE
 
@@ -30,13 +34,6 @@ echo [ELITE] Starte Jarvis HUD (Electron)...
 cd /d "%REPO_ROOT%\desktop"
 start "" "..\node_modules\electron\dist\electron.exe" .
 
-:: 4. Warten bis LiveKit-Worker (agent.py) laeuft — sonst „ELITE CORE OFFLINE“
-echo [ELITE] Warte auf Jarvis Core (agent.py, Port 7861)...
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%REPO_ROOT%\scripts\wait-jarvis-core.ps1"
-if errorlevel 1 (
-  echo [ELITE] WARNUNG: Backend noch nicht bereit. Log: %USERPROFILE%\Desktop\EliteAgent_services.log
-  echo          Manuell: cd backend ^&^& python agent.py dev
-)
-
-echo [ELITE] System gestartet. HUD: http://127.0.0.1:3000  ^|  Core: :7861  ^|  Hermes: :8642  ^|  Pulse: :31337
+:: 4. System gestartet
+echo [ELITE] System gestartet. HUD: http://127.0.0.1:3000  |  Core: :7861  |  Hermes: :8642  |  Pulse: :31337
 exit /b 0

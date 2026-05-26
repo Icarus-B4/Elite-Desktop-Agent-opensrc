@@ -985,9 +985,9 @@ type CombinedMessage = {
   pending?: boolean;
 };
 
-/** Widgets, die den Orb verkleinern / Sidebars ausblenden (Chat, Webcam, Terminal ausgenommen). */
+/** Widgets, die den Orb verkleinern / Sidebars ausblenden (Webcam, Terminal ausgenommen). */
 function isOrbBlockingWidget(id: string): boolean {
-  return id !== 'webcam' && id !== 'chat' && id !== 'terminal';
+  return id !== 'webcam' && id !== 'terminal';
 }
 
 function normalizeMessageTimestamp(raw: unknown, fallback: number): number {
@@ -1530,16 +1530,20 @@ function SupportInterface({
     if (typeof window === 'undefined') return [];
     try {
       const stored = localStorage.getItem(CHAT_STORAGE_KEY);
-      return stored ? JSON.parse(stored) : [];
+      const clearedAtVal = parseInt(localStorage.getItem('elite-chat-cleared-at') || '0');
+      const messages: CombinedMessage[] = stored ? JSON.parse(stored) : [];
+      return messages.filter(m => m.timestamp > clearedAtVal);
     } catch {
       return [];
     }
   });
 
-  // Flag: Wurde der Verlauf manuell gelöscht? Verhindert sofortiges Neu-Speichern
-  const [isCleared, setIsCleared] = useState(false);
   // Merke den Zeitpunkt des Löschens – nur neuere Nachrichten werden danach angezeigt
-  const clearedAtRef = useRef<number>(0);
+  const [clearedAt, setClearedAt] = useState<number>(() => {
+    if (typeof window === 'undefined') return 0;
+    const val = localStorage.getItem('elite-chat-cleared-at');
+    return val ? parseInt(val) || 0 : 0;
+  });
 
   // Hermes-Verlauf aus Widget-Chat migrieren (einmalig)
   useEffect(() => {
@@ -1609,15 +1613,12 @@ function SupportInterface({
     type OrderedMessage = CombinedMessage & { order: number };
     const messages: OrderedMessage[] = [];
     let order = 0;
-    const clearedAt = clearedAtRef.current;
-    const includeTs = (ts: number) => !isCleared || ts >= clearedAt;
+    const includeTs = (ts: number) => ts > clearedAt;
     const now = Date.now();
 
-    if (!isCleared) {
-      for (const msg of savedMessages) {
-        if (!includeTs(msg.timestamp)) continue;
-        messages.push({ ...msg, order: order++ });
-      }
+    for (const msg of savedMessages) {
+      if (!includeTs(msg.timestamp)) continue;
+      messages.push({ ...msg, order: order++ });
     }
 
     chatMessages.forEach((msg, i) => {
@@ -1715,11 +1716,11 @@ function SupportInterface({
     }
 
     return deduplicated;
-  }, [chatMessages, transcriptions, savedMessages, hermesMessages, isCleared, fixUmlauts, rejectedTranscripts, voiceAssistantMode]);
+  }, [chatMessages, transcriptions, savedMessages, hermesMessages, clearedAt, fixUmlauts, rejectedTranscripts, voiceAssistantMode]);
 
-  // Neue Nachrichten automatisch in localStorage speichern (nicht wenn gerade gelöscht)
+  // Neue Nachrichten automatisch in localStorage speichern
   useEffect(() => {
-    if (combinedMessages.length > 0 && !isCleared) {
+    if (combinedMessages.length > 0) {
       try {
         const toSave = combinedMessages.slice(-100);
         localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(toSave));
@@ -1727,11 +1728,7 @@ function SupportInterface({
         // localStorage voll oder nicht verfügbar
       }
     }
-    // Wenn nach dem Löschen neue Nachrichten kommen, Speichern wieder aktivieren
-    if (isCleared && combinedMessages.length > 0) {
-      setIsCleared(false);
-    }
-  }, [combinedMessages, isCleared]);
+  }, [combinedMessages]);
 
   // ─── T1: Tool-Event-Streaming zum Log-Stream Widget ───
   // Nutzt die globale window.elite API (registriert vom WidgetManagerProvider)
@@ -1787,9 +1784,10 @@ function SupportInterface({
   const clearChatHistory = useCallback(() => {
     localStorage.removeItem(CHAT_STORAGE_KEY);
     localStorage.removeItem('elite-dashboard-chat');
+    const now = Date.now();
+    localStorage.setItem('elite-chat-cleared-at', now.toString());
     setSavedMessages([]);
-    clearedAtRef.current = Date.now();
-    setIsCleared(true);
+    setClearedAt(now);
   }, []);
 
   // Auf globales Lösch-Event reagieren (vom Toolbar-Button)
@@ -1797,8 +1795,8 @@ function SupportInterface({
     const handleClear = () => {
       localStorage.removeItem(CHAT_STORAGE_KEY);
       setSavedMessages([]);
-      clearedAtRef.current = Date.now();
-      setIsCleared(true);
+      const now = Date.now();
+      setClearedAt(now);
     };
     window.addEventListener('chat-cleared', handleClear);
     return () => window.removeEventListener('chat-cleared', handleClear);
@@ -2358,6 +2356,8 @@ function renderMainOverlayWidget(id: WidgetId, onSend: (text: string) => void) {
       return <WebcamWidget />;
     case 'imageGrid':
       return <ImageGridWidget />;
+    case 'chat':
+      return <ChatWidget />;
     case 'systemMonitor':
       return <SystemMonitorWidget />;
     case 'music':
@@ -2396,9 +2396,9 @@ function MainWidgetOverlay({ onSend }: { onSend: (text: string) => void }) {
   const anyExpanded =
     Object.values(expandedWidgets).some(Boolean) || fullscreenWidget !== null;
 
-  // Chat, Webcam und authLock im Grid ausgeschlossen; Pop-out ausgeblendet
+  // Webcam und authLock im Grid ausgeschlossen; Pop-out ausgeblendet
   const openGridIds = widgetOrder.filter(
-    (id) => widgets[id] && id !== 'chat' && id !== 'webcam' && id !== 'authLock' && !detachedWidgets[id],
+    (id) => widgets[id] && id !== 'webcam' && id !== 'authLock' && !detachedWidgets[id],
   );
   const gridWidgets = fullscreenWidget
     ? openGridIds.filter((id) => id !== fullscreenWidget)

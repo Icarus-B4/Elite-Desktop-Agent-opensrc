@@ -245,10 +245,6 @@ function createWindow() {
   mainWindow.once('ready-to-show', () => {
     if (!mainWindow) return;
     mainWindow.focus();
-
-    if (isDev) {
-      mainWindow.webContents.openDevTools({ mode: 'detach' });
-    }
   });
 
   mainWindow.on('close', (event) => {

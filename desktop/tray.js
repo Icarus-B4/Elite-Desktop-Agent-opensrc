@@ -37,6 +37,26 @@ function setupTray({ getWindow, onQuitRequested }) {
         },
         { type: 'separator' },
         {
+          label: 'System Logs (Terminal)',
+          click: () => {
+            const { toggleLogWindow } = require('./log-window');
+            toggleLogWindow();
+          },
+        },
+        {
+          label: 'Developer Tools',
+          click: () => {
+            const win = getMainWindow();
+            if (!win) return;
+            if (win.webContents.isDevToolsOpened()) {
+              win.webContents.closeDevTools();
+            } else {
+              win.webContents.openDevTools({ mode: 'detach' });
+            }
+          },
+        },
+        { type: 'separator' },
+        {
           label: 'Beenden',
           click: () => onQuit(),
         },

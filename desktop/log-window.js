@@ -86,4 +86,4 @@ function setupTerminalToggle() {
   });
 }
 
-module.exports = { setupTerminalToggle };
+module.exports = { setupTerminalToggle, toggleLogWindow };
