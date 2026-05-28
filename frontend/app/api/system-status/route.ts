@@ -36,6 +36,8 @@ interface SystemStatusPayload {
   configured_llm_mode: string | null;
   effective_llm_mode: string | null;
   llm_fallback_reason: string | null;
+  llm_stack_ready: boolean | null;
+  llm_stack_message: string | null;
   elite_ready: boolean;
   status?: 'fallback';
   _cache?: 'hit' | 'miss';
@@ -202,6 +204,8 @@ function readAgentRuntimeState(): {
   configuredLlmMode?: string;
   effectiveLlmMode?: string;
   llmFallbackReason?: string | null;
+  llmStackReady?: boolean | null;
+  llmStackMessage?: string | null;
 } {
   try {
     const base = process.env.LOCALAPPDATA || process.env.APPDATA;
@@ -363,7 +367,8 @@ export async function GET() {
   const elite_ready =
     cachedMetrics.agent_status === 'RUNNING' &&
     cachedServices.livekit_status === 'ready' &&
-    cachedServices.pulse_status === 'ready';
+    cachedServices.pulse_status === 'ready' &&
+    (agentRuntime.llmStackReady !== false);
 
   const payload: SystemStatusPayload = {
     cpu_percent: liveCpu,
@@ -382,6 +387,8 @@ export async function GET() {
     configured_llm_mode: agentRuntime.configuredLlmMode ?? null,
     effective_llm_mode: agentRuntime.effectiveLlmMode ?? null,
     llm_fallback_reason: agentRuntime.llmFallbackReason ?? null,
+    llm_stack_ready: agentRuntime.llmStackReady ?? null,
+    llm_stack_message: agentRuntime.llmStackMessage ?? null,
     elite_ready,
     _cache: 'hit',
   };

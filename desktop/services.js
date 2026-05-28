@@ -48,6 +48,11 @@ let ROOT;
 let logFile;
 let eliteLogFile;
 let processes = [];
+let isShuttingDown = false;
+const WATCHED_SERVICES = new Set(['Jarvis Core', 'Frontend', 'PTY Server']);
+const restartAttempts = new Map();
+const MAX_RESTARTS = 3;
+const RESTART_DELAYS_MS = [5000, 15000, 30000];
 let readiness = {
   backend: false,
   hermes: false,
@@ -186,6 +191,10 @@ async function freePort(port) {
 }
 
 async function cleanupOldInstances() {
+  if (process.env.ELITE_SKIP_PRESTART === '1') {
+    log('[Services] Cleanup übersprungen (elite-prestart bereits gelaufen).', { eliteOnly: true });
+    return;
+  }
   log('[Services] Cleanup: Elite-Python, LiveKit-Worker, Elite-Ports…');
   const psScript = `
     try {
@@ -211,14 +220,123 @@ async function cleanupOldInstances() {
     log(`[Services] Cleanup Python: ${e.message}`);
   }
 
-  for (const port of ELITE_PORTS) {
-    await freePort(port);
-  }
+  await Promise.all(ELITE_PORTS.map((port) => freePort(port)));
   await new Promise((r) => setTimeout(r, 800));
+}
+
+function buildBaseServiceEnv(eliteFileEnv, isPackaged, paiRoot, pulseApi, hermesInfo) {
+  return {
+    ...eliteFileEnv,
+    BROWSER: 'none',
+    NODE_ENV: isPackaged ? 'production' : 'development',
+    NODE_PATH: path.join(ROOT, 'node_modules'),
+    DOTNET_BUNDLE_EXTRACT_BASE_DIR: path.join(os.tmpdir(), 'elite-agent-dotnet'),
+    PAI_HOME: paiRoot,
+    PAI_PULSE_URL: pulseApi,
+    HERMES_GATEWAY_URL: getHermesGatewayUrl(),
+    HERMES_DASHBOARD_URL: getHermesDashboardUrl(),
+    HERMES_HOME: hermesInfo.home,
+    ELITE_HERMES_RUNTIME: hermesInfo.active,
+    ELITE_HERMES_DASHBOARD_INSECURE: process.env.ELITE_HERMES_DASHBOARD_INSECURE || '1',
+    API_SERVER_ENABLED: eliteFileEnv.API_SERVER_ENABLED || 'true',
+    PYTHONUTF8: '1',
+    PYTHONIOENCODING: 'utf-8',
+  };
+}
+
+function resolveSpawnArgs(service, ptyExe) {
+  let cmd;
+  let args;
+  const useStableCore = process.env.ELITE_AGENT_MODE === 'start';
+  if (service.name === 'UI Automation') {
+    cmd = path.join(ROOT, 'lib', 'automation', 'UiAutomationGRPC.Server.exe');
+    args = [];
+  } else if (service.name === 'PAI Pulse') {
+    const pulse = buildPulseCommand('start');
+    cmd = pulse.cmd;
+    args = pulse.args;
+  } else if (service.hermesStack) {
+    const stack = buildHermesStackStartCommand();
+    cmd = stack.cmd;
+    args = stack.args;
+  } else if (service.hermes) {
+    const { buildHermesGatewayCommand } = require('./hermes-runtime');
+    const hermes = buildHermesGatewayCommand('start');
+    cmd = hermes.cmd;
+    args = hermes.args;
+  } else if (service.name === 'Jarvis Core' && process.platform === 'win32') {
+    cmd = process.env.ComSpec || 'cmd.exe';
+    const yarnScript = useStableCore ? 'yarn run start:core-stable' : 'yarn run start:core';
+    args = ['/d', '/s', '/c', yarnScript];
+  } else if (service.name === 'Frontend' && process.platform === 'win32') {
+    cmd = process.env.ComSpec || 'cmd.exe';
+    args = ['/d', '/s', '/c', 'yarn run dev'];
+  } else if (service.name === 'PTY Server') {
+    cmd = ptyExe;
+    args = [];
+  } else {
+    const parts = service.cmd.split(' ');
+    cmd = parts[0];
+    args = parts.slice(1);
+  }
+
+  const useShell =
+    service.name !== 'UI Automation' &&
+    service.name !== 'Jarvis Core' &&
+    service.name !== 'Frontend' &&
+    service.name !== 'PTY Server' &&
+    !service.hermes &&
+    !service.hermesStack;
+
+  return { cmd, args, useShell };
+}
+
+function scheduleServiceRestart(service, spawnContext) {
+  if (isShuttingDown || !WATCHED_SERVICES.has(service.name)) return;
+  const attempts = restartAttempts.get(service.name) || 0;
+  if (attempts >= MAX_RESTARTS) {
+    log(`[${service.name}] Max. Neustarts (${MAX_RESTARTS}) erreicht — kein weiterer Versuch.`);
+    return;
+  }
+  const delay = RESTART_DELAYS_MS[attempts] || RESTART_DELAYS_MS[RESTART_DELAYS_MS.length - 1];
+  restartAttempts.set(service.name, attempts + 1);
+  log(`[${service.name}] Neustart in ${delay / 1000}s (Versuch ${attempts + 1}/${MAX_RESTARTS})…`);
+  setTimeout(() => {
+    if (isShuttingDown) return;
+    spawnManagedService(service, spawnContext);
+  }, delay);
+}
+
+function spawnManagedService(service, ctx) {
+  const { cmd, args, useShell } = resolveSpawnArgs(service, ctx.ptyExe);
+
+  log(`[Services] Starte ${service.name} in ${service.cwd}...`);
+
+  const proc = spawn(cmd, args, {
+    cwd: service.cwd,
+    shell: useShell,
+    windowsHide: true,
+    env: buildBaseServiceEnv(ctx.eliteFileEnv, ctx.isPackaged, ctx.paiRoot, ctx.pulseApi, ctx.hermesInfo),
+  });
+
+  proc.stdout.on('data', (data) => logProcessOutput(service.name, data));
+  proc.stderr.on('data', (data) => logProcessOutput(`${service.name}-Error`, data));
+  proc.on('error', (err) => log(`[${service.name}] FATAL Error: ${err.message}`));
+  proc.on('exit', (code) => {
+    log(`[${service.name}] Beendet mit Code ${code}`);
+    processes = processes.filter((p) => p !== proc);
+    if (code !== 0 && code !== null) {
+      scheduleServiceRestart(service, ctx);
+    }
+  });
+
+  processes.push(proc);
+  return proc;
 }
 
 async function startServices() {
   try {
+    isShuttingDown = false;
     initPaths();
     log('====================================================', { eliteOnly: true });
     log(`[Services] START - Root: ${ROOT}`, { eliteOnly: true });
@@ -327,79 +445,18 @@ async function startServices() {
         `AppData=${getAppDataBackendDir() || 'n/a'}`,
     );
 
+    const spawnContext = {
+      eliteFileEnv,
+      isPackaged,
+      paiRoot,
+      pulseApi,
+      hermesInfo,
+      ptyExe,
+    };
+
+    restartAttempts.clear();
     serviceCommands.forEach((service) => {
-      log(`[Services] Starte ${service.name} in ${service.cwd}...`);
-
-      let cmd;
-      let args;
-      if (service.name === 'UI Automation') {
-        cmd = path.join(ROOT, 'lib', 'automation', 'UiAutomationGRPC.Server.exe');
-        args = [];
-      } else if (service.name === 'PAI Pulse') {
-        const pulse = buildPulseCommand('start');
-        cmd = pulse.cmd;
-        args = pulse.args;
-      } else if (service.hermesStack) {
-        const stack = buildHermesStackStartCommand();
-        cmd = stack.cmd;
-        args = stack.args;
-      } else if (service.hermes) {
-        const { buildHermesGatewayCommand } = require('./hermes-runtime');
-        const hermes = buildHermesGatewayCommand('start');
-        cmd = hermes.cmd;
-        args = hermes.args;
-      } else if (service.name === 'Jarvis Core' && process.platform === 'win32') {
-        cmd = process.env.ComSpec || 'cmd.exe';
-        args = ['/d', '/s', '/c', 'yarn run start:core'];
-      } else if (service.name === 'Frontend' && process.platform === 'win32') {
-        cmd = process.env.ComSpec || 'cmd.exe';
-        args = ['/d', '/s', '/c', 'yarn run dev'];
-      } else if (service.name === 'PTY Server') {
-        cmd = ptyExe;
-        args = [];
-      } else {
-        const parts = service.cmd.split(' ');
-        cmd = parts[0];
-        args = parts.slice(1);
-      }
-
-      const useShell =
-        service.name !== 'UI Automation' &&
-        service.name !== 'Jarvis Core' &&
-        service.name !== 'Frontend' &&
-        service.name !== 'PTY Server' &&
-        !service.hermes &&
-        !service.hermesStack;
-
-      const env = {
-        ...eliteFileEnv,
-        BROWSER: 'none',
-        NODE_ENV: isPackaged ? 'production' : 'development',
-        NODE_PATH: path.join(ROOT, 'node_modules'),
-        DOTNET_BUNDLE_EXTRACT_BASE_DIR: path.join(os.tmpdir(), 'elite-agent-dotnet'),
-        PAI_HOME: paiRoot,
-        PAI_PULSE_URL: pulseApi,
-        HERMES_GATEWAY_URL: getHermesGatewayUrl(),
-        HERMES_DASHBOARD_URL: getHermesDashboardUrl(),
-        HERMES_HOME: hermesInfo.home,
-        ELITE_HERMES_RUNTIME: hermesInfo.active,
-        ELITE_HERMES_DASHBOARD_INSECURE: process.env.ELITE_HERMES_DASHBOARD_INSECURE || '1',
-        API_SERVER_ENABLED: eliteFileEnv.API_SERVER_ENABLED || 'true',
-      };
-
-      const proc = spawn(cmd, args, {
-        cwd: service.cwd,
-        shell: useShell,
-        windowsHide: true,
-        env,
-      });
-
-      proc.stdout.on('data', (data) => logProcessOutput(service.name, data));
-      proc.stderr.on('data', (data) => logProcessOutput(`${service.name}-Error`, data));
-      proc.on('error', (err) => log(`[${service.name}] FATAL Error: ${err.message}`));
-      proc.on('exit', (code) => log(`[${service.name}] Beendet mit Code ${code}`));
-
-      processes.push(proc);
+      spawnManagedService(service, spawnContext);
     });
 
     await new Promise((r) => setTimeout(r, 1200));
@@ -412,6 +469,7 @@ async function startServices() {
 }
 
 async function stopServices() {
+  isShuttingDown = true;
   log(`[Services] Beende alle Dienste (${processes.length})...`);
   const stopping = processes.map(
     (proc) =>

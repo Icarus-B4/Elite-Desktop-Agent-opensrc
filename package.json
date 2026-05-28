@@ -6,10 +6,12 @@
   "scripts": {
     "start:hermes": "hermes gateway start",
     "start:backend": "cd backend && python agent.py dev",
+    "start:backend-stable": "cd backend && python agent.py start",
     "start:analyzer": "cd backend && python frame_analyzer.py",
     "start:frontend": "cd frontend && yarn run dev",
     "start:ui-automation": "\"lib\\automation\\UiAutomationGRPC.Server.exe\"",
     "start:core": "yarn concurrently \"yarn run start:backend\" \"yarn run start:analyzer\" \"yarn run start:ui-automation\"",
+    "start:core-stable": "yarn concurrently \"yarn run start:backend-stable\" \"yarn run start:analyzer\" \"yarn run start:ui-automation\"",
     "start:all": "yarn concurrently \"yarn run start:backend\" \"yarn run start:analyzer\" \"yarn run start:frontend\" \"yarn run start:ui-automation\"",
     "migrate:hermes": "node ./scripts/migrate-elite-to-hermes.mjs",
     "install:hermes:wsl": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/install-hermes-wsl.ps1",

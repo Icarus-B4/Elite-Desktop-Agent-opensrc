@@ -376,7 +376,7 @@ def _silero_vad_for_mode(va_mode: int):
         return silero.VAD.load(
             min_speech_duration=0.08,
             min_silence_duration=0.55,
-            activation_threshold=0.45,
+            activation_threshold=0.50,
         )
     if va_mode == 3:
         return silero.VAD.load(
@@ -397,10 +397,8 @@ def build_local_voice_stack(config: dict) -> LocalVoiceStack:
     va_mode = int(config.get("voiceAssistant", 0))
 
     if not check_ollama_reachable(base_url):
-        logger.warning(
-            "Ollama nicht erreichbar unter %s – starte: ollama serve && ollama pull %s",
-            base_url,
-            model,
+        raise RuntimeError(
+            f"Ollama nicht erreichbar unter {base_url} – starte: ollama serve && ollama pull {model}"
         )
 
     if check_ollama_openai_compatible(base_url, model):

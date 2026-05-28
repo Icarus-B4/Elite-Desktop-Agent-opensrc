@@ -37,6 +37,7 @@ from elite_config import (
     resolve_effective_llm_mode,
     resolve_ollama_model,
     is_local_llm_active,
+    validate_llm_stack,
     write_agent_runtime_state,
 )
 from stt_corrections import WHISPER_INITIAL_PROMPT, apply_german_stt_corrections
@@ -450,7 +451,7 @@ async def analyze_frame_with_vision(frame_b64: str) -> tuple[str, dict | None]:
         
         async with aiohttp.ClientSession() as session:
             payload = {
-                "model": "gpt-4o",
+                "model": "gpt-4o-mini",
                 "messages": [
                     {
                         "role": "user",
@@ -575,7 +576,7 @@ class WebstarkAgent(Agent):
             "Frage NUR nach wenn absolut unklar.\n"
             "Wenn in einem Medienbefehl 'Saturn' zusammen mit 'ProSieben', 'Pro sieben' oder 'Pro7' erscheint, "
             "ist mit hoher Wahrscheinlichkeit 'Zattoo' gemeint. Öffne dann Zattoo und behandle den Sender als ProSieben.\n"
-            "21. SELBSTHEILUNG & LERNEN: Du hast Zugriff auf 'trigger_self_healing_workflow' und 'trigger_learning_cycle'. Wenn der Nutzer über einen Fehler klagt oder du einen Fehler/Traceback in der Zwischenablage (Smart Clipboard) oder Log-Dateien erkennst, starte 'trigger_self_healing_workflow' mit der Fehlermeldung und der betroffenen Datei. Falls die Selbstheilung meldet, dass die Datei fehlt oder unbekannt ist, suche die Datei aktiv mit 'execute_system_command' unter Verwendung von PowerShell-Suchbefehlen (z. B. 'Get-ChildItem -Recurse -Filter <name>') im Projektverzeichnis, ermittle den absoluten Pfad und rufe 'trigger_self_healing_workflow' erneut mit dem expliziten 'target_file'-Parameter auf. Starte regelmäßig oder nach größeren Aufgaben 'trigger_learning_cycle', um gelernte Regeln zu konsolidieren und deine Arbeitsweise selbstständig zu optimieren.\n"
+            "21. SELBSTHEILUNG & LERNEN: Du hast Zugriff auf 'trigger_self_healing_workflow', 'trigger_system_analysis_and_repair' und 'trigger_learning_cycle'. Wenn der Nutzer eine Systemreparatur oder Systemanalyse verlangt, starte IMMER zuerst 'trigger_system_analysis_and_repair'. Dieses Tool prüft das gesamte System, loggt gefundene Fehler in einem Markdown-Bericht auf dem Desktop und stößt automatisch die Selbstheilung an. Wenn der Nutzer über einen konkreten Fehler klagt, starte direkt 'trigger_self_healing_workflow' mit der Fehlermeldung und der betroffenen Datei. Falls die Selbstheilung meldet, dass die Datei fehlt oder unbekannt ist, suche die Datei aktiv mit 'execute_system_command' unter Verwendung von PowerShell-Suchbefehlen (z. B. 'Get-ChildItem -Recurse -Filter <name>') im Projektverzeichnis, ermittle den absoluten Pfad und rufe 'trigger_self_healing_workflow' erneut mit dem expliziten 'target_file'-Parameter auf. Starte regelmäßig oder nach größeren Aufgaben 'trigger_learning_cycle', um gelernte Regeln zu konsolidieren und deine Arbeitsweise selbstständig zu optimieren.\n"
             "23. CODE-REVIEW (CodeReview / code-review): Für Code-Analyse, Qualitätsprüfung oder Review lies den Skill per 'read_file' am Pfad aus <available_skills><location> (z. B. backend/skills/code_review/SKILL.md oder .claude/skills/CodeReview/SKILL.md) und folge Workflows/Review.md. Skills sind Markdown-Anleitungen — starte NIEMALS 'run_code_review.py', 'elite_dev_runner.py' oder 'spawn_agent_worker' für Skills; diese Dateien existieren nicht.\n"
             "22. ADA-FÄHIGKEITEN: Nutze Projekt-Tools (create_project, switch_project, list_projects, get_project_context) für task-scoped Memory. "
             "CAD: generate_cad_prototype / iterate_cad_prototype → cad-Widget. Drucker: discover_printers, slice_stl, start_print, get_print_status → printer-Widget (Mock bis Hardware). "
@@ -622,16 +623,25 @@ class WebstarkAgent(Agent):
             
         # PAI-Instruktionen einfügen falls geladen
         if pai_instructions:
+            # Sicherheits-Kürzung für OpenAI Realtime API (max 16384 Tokens Session-Instructions Limit)
+            max_context_chars = 4000
+            truncated_context = pai_instructions
+            if len(truncated_context) > max_context_chars:
+                truncated_context = truncated_context[:max_context_chars] + "\n... [PAI-Kontext gekürzt wegen Realtime API Limit]"
+
             instructions += (
                 f"\n\n--- DANIEL MIESSLER PAI LIFE OS CONTEXT ---\n"
                 f"Du bist das ausführende Gehirn der Personal AI Infrastructure (PAI). "
                 f"Deine Kern-Identität und Arbeitsgrundlage basiert direkt auf den folgenden Benutzer-Konfigurationen: "
-                f"{pai_instructions}"
+                f"{truncated_context}"
             )
             if state.work_state:
+                ws_filtered = dict(state.work_state)
+                ws_filtered.pop("sessions", None)
+                ws_str = json.dumps(ws_filtered, ensure_ascii=False, indent=2)
                 instructions += (
                     "\n\n--- PAI WORK STATE ---\n"
-                    f"{json.dumps(state.work_state, ensure_ascii=False, indent=2)}"
+                    f"{ws_str}"
                 )
             
         instructions += extra_instructions
@@ -647,7 +657,7 @@ class WebstarkAgent(Agent):
         # voiceAssistant: 0 = Rauschfilter (empfohlen), 1 = hohe Empfindlichkeit, 2 = schnelle Antwort, 3 = Ultra-Strict VAD
         va_mode = int(config.get("voiceAssistant", 0))
         if va_mode == 1:
-            threshold = 0.45
+            threshold = 0.50
             silence_duration_ms = 750
             prefix_padding_ms = 450
         elif va_mode == 2:
@@ -715,6 +725,7 @@ class WebstarkAgent(Agent):
             super().__init__(
                 instructions=instructions,
                 llm=openai.realtime.RealtimeModel(
+                    model=config.get("realtimeModel", "gpt-realtime-mini"),
                     voice=config.get("voice", "echo"),
                     modalities=["audio", "text"],
                     input_audio_transcription={
@@ -768,13 +779,27 @@ async def entrypoint(ctx: JobContext):
 
         config = load_config()
         llm_mode, llm_fallback_reason = resolve_effective_llm_mode(config)
+        stack_ok, _, stack_msg, _ = validate_llm_stack(config)
         livekit_mode = str(config.get("livekitMode", "cloud")).lower()
         configured_mode = str(config.get("llmMode", "auto")).lower()
         write_agent_runtime_state(
             configured_llm_mode=configured_mode,
             effective_llm_mode=llm_mode,
             fallback_reason=llm_fallback_reason,
+            llm_stack_ready=stack_ok,
+            llm_stack_message=stack_msg or None,
         )
+        if not stack_ok:
+            logger.error("LLM-Stack nicht bereit — Session wird nicht gestartet: %s", stack_msg)
+            await publish_room_data(
+                {
+                    "type": "llm_unavailable",
+                    "message": stack_msg,
+                    "effective": llm_mode,
+                    "fallback": llm_fallback_reason,
+                }
+            )
+            return
         logger.info(
             "Elite Agent startet fuer %s (Identity: %s, llmMode=%s, effective=%s, livekitMode=%s, openaiKey=%s)...",
             user_name,
@@ -845,6 +870,7 @@ async def entrypoint(ctx: JobContext):
             allow_interruptions=True,
         )
         active_reply_task: asyncio.Task | None = None
+        last_activity_time = time.time()
 
         @session.on("close")
         def on_session_close(ev: CloseEvent) -> None:
@@ -905,10 +931,11 @@ async def entrypoint(ctx: JobContext):
 
         @session.on("user_input_transcribed")
         def on_user_transcribed(ev: UserInputTranscribedEvent) -> None:
-            nonlocal active_reply_task
+            nonlocal active_reply_task, last_activity_time
             transcript = (ev.transcript or "").strip()
             if not transcript:
                 return
+            last_activity_time = time.time()
 
             if is_stop_command(transcript):
                 logger.info(
@@ -985,10 +1012,11 @@ async def entrypoint(ctx: JobContext):
             )
 
             if not accepted:
+                safe_transcript = transcript.encode("ascii", errors="replace").decode("ascii")
                 logger.info(
                     "[WakeWordFilter] Eingabe ignoriert (mode=%s): '%s'",
                     va_mode,
-                    transcript,
+                    safe_transcript,
                 )
                 try:
                     session.clear_user_turn()
@@ -1025,6 +1053,9 @@ async def entrypoint(ctx: JobContext):
                 return
 
             if not gate_auto_response:
+
+                # Timeout für generate_reply (verhindert endloses Hängen bei API-Problemen)
+                _GATED_REPLY_TIMEOUT = 45  # Sekunden
 
                 async def gated_reply() -> None:
                     try:
@@ -1074,7 +1105,33 @@ async def entrypoint(ctx: JobContext):
                                 allow_interruptions=True,
                             )
                             return
-                        await session.generate_reply(user_input=corrected_transcript)
+                        await asyncio.wait_for(
+                            session.generate_reply(user_input=corrected_transcript),
+                            timeout=_GATED_REPLY_TIMEOUT,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            "[WakeWordGate] generate_reply Timeout nach %ss – LLM antwortet nicht",
+                            _GATED_REPLY_TIMEOUT,
+                        )
+                        _emit_debug_log(
+                            "H10",
+                            "backend/agent.py:reply",
+                            "gated-reply-timeout",
+                            {
+                                "transcript": transcript,
+                                "timeout_s": _GATED_REPLY_TIMEOUT,
+                                "llm_mode": llm_mode,
+                            },
+                        )
+                        try:
+                            await session.say(
+                                "Entschuldigung, das Sprachmodell antwortet momentan nicht. "
+                                "Bitte prüfe die API-Verbindung oder starte mich neu.",
+                                allow_interruptions=True,
+                            )
+                        except Exception:
+                            pass
                     except asyncio.CancelledError:
                         logger.info("[WakeWordGate] Antwort abgebrochen (Stopp)")
                         raise
@@ -1086,8 +1143,8 @@ async def entrypoint(ctx: JobContext):
                                 "log": {
                                     "type": "error",
                                     "message": (
-                                        f"Offline-Antwort fehlgeschlagen: {ge}. "
-                                        "Ollama läuft? Wake-Word „Elite“ gesagt?"
+                                        f"KI-Antwort fehlgeschlagen: {ge}. "
+                                        "API-Key gültig? Ollama erreichbar?"
                                     ),
                                 },
                             }
@@ -1439,15 +1496,40 @@ async def entrypoint(ctx: JobContext):
                     logger.debug(f"Hermes HUD stream: {stream_err}")
                 await asyncio.sleep(3)
 
+        async def inactivity_monitor():
+            nonlocal last_activity_time
+            inactivity_timeout = 300  # 5 Minuten Standby
+            logger.info("Inaktivitäts-Monitor aktiv. Timeout: %ds", inactivity_timeout)
+            while ctx.room.isconnected():
+                await asyncio.sleep(10)
+                elapsed = time.time() - last_activity_time
+                if elapsed > inactivity_timeout:
+                    logger.info("Inaktivitäts-Timeout erreicht (%ds idle). Schließe Realtime-Session.", int(elapsed))
+                    try:
+                        await session.say(
+                            "Elite geht in den Standby-Modus, um Ressourcen zu sparen. Klicke im Dashboard auf 'Elite aktivieren', wenn du mich wieder brauchst.",
+                            allow_interruptions=False,
+                        )
+                        await asyncio.sleep(8)
+                    except Exception as err:
+                        logger.warning("Fehler beim Standby-Spruch: %s", err)
+                    try:
+                        await ctx.room.disconnect()
+                    except Exception as err:
+                        logger.warning("Inaktivitäts-Disconnect fehlgeschlagen: %s", err)
+                    break
+
         # Starte die Tasks im Hintergrund
         asyncio.create_task(system_monitor_task())
         asyncio.create_task(meeting_guard_loop())
         asyncio.create_task(weather_streamer())
         asyncio.create_task(clipboard_monitor_task())
         asyncio.create_task(hermes_hud_stream_task())
+        asyncio.create_task(inactivity_monitor())
 
         @ctx.room.on("data_received")
         def on_data_received(data_packet: rtc.DataPacket):
+            nonlocal last_activity_time
             try:
                 payload = data_packet.data.decode("utf-8")
                 data = json.loads(payload)
@@ -1467,6 +1549,7 @@ async def entrypoint(ctx: JobContext):
                     asyncio.create_task(ctx.room.local_participant.publish_data(log_vision.encode('utf-8')))
                 
                 elif data.get("type") == "vision_frame":
+                    last_activity_time = time.time()
                     logger.info("Echte Webcam-Analyse (Frame) gestartet...")
                     frame = data.get("frame")
                     if frame and hasattr(session, "assistant"):
@@ -1500,6 +1583,7 @@ async def entrypoint(ctx: JobContext):
                     text = str(data.get("message") or data.get("text") or "").strip()
                     if not text:
                         return
+                    last_activity_time = time.time()
                     logger.info("Dashboard Befehl: %s", text)
 
                     async def handle_dashboard_command() -> None:

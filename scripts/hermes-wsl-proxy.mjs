@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
- * Windows localhost bridge: 127.0.0.1:9119 -> WSL Hermes dashboard (0.0.0.0:9119).
- * WSL2 spiegelt localhost oft nicht — Browser bekommt sonst ERR_CONNECTION_REFUSED (-102).
+ * Windows localhost bridge:
+ * - 127.0.0.1:9119 -> WSL Hermes dashboard (0.0.0.0:9119)
+ * - 127.0.0.1:8642 -> WSL Hermes gateway (0.0.0.0:8642)
+ * WSL2 spiegelt localhost oft nicht — Browser bekommt sonst ERR_CONNECTION_REFUSED.
  */
 import { spawnSync } from 'child_process';
 import http from 'http';
@@ -11,10 +13,13 @@ import path from 'path';
 import os from 'os';
 
 const LISTEN_HOST = '127.0.0.1';
-const LISTEN_PORT = Number(process.env.HERMES_DASHBOARD_PROXY_PORT || 9119);
-const TARGET_PORT = LISTEN_PORT;
 const DISTRO = process.env.HERMES_WSL_DISTRO || 'Ubuntu';
 const PID_FILE = path.join(os.tmpdir(), 'elite-hermes-dashboard-proxy.pid');
+
+const PORTS_TO_PROXY = [
+  { listenPort: Number(process.env.HERMES_DASHBOARD_PROXY_PORT || 9119), targetPort: 9119, name: 'Dashboard' },
+  { listenPort: Number(process.env.HERMES_GATEWAY_PROXY_PORT || 8642), targetPort: 8642, name: 'Gateway API' }
+];
 
 function log(msg) {
   console.log(`[Hermes Proxy] ${msg}`);
@@ -55,9 +60,13 @@ function stopPrevious() {
   try {
     const oldPid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
     if (oldPid > 0) {
-      process.kill(oldPid, 0);
-      process.kill(oldPid);
-      log(`Alter Proxy beendet (PID ${oldPid})`);
+      try {
+        process.kill(oldPid, 0);
+        process.kill(oldPid);
+        log(`Alter Proxy beendet (PID ${oldPid})`);
+      } catch {
+        /* ignore if already dead */
+      }
     }
   } catch {
     /* nicht mehr aktiv */
@@ -69,33 +78,13 @@ function stopPrevious() {
   }
 }
 
-async function main() {
-  if (process.platform !== 'win32') {
-    log('Nur unter Windows nötig — in WSL direkt 127.0.0.1:9119 nutzen.');
-    process.exit(0);
-  }
-
-  if (await probeHttp(`http://${LISTEN_HOST}:${LISTEN_PORT}/`)) {
-    log(`http://${LISTEN_HOST}:${LISTEN_PORT} antwortet bereits — kein Proxy nötig.`);
-    process.exit(0);
-  }
-
-  stopPrevious();
-
-  const wslIp = getWslIp();
-  const targetBase = `http://${wslIp}:${TARGET_PORT}`;
-
-  if (!(await probeHttp(`${targetBase}/`))) {
-    log(`Dashboard in WSL nicht erreichbar (${targetBase}) — Proxy übersprungen.`);
-    process.exit(1);
-  }
-
+function createProxyServer(listenPort, targetPort, wslIp, name) {
   const server = http.createServer((clientReq, clientRes) => {
-    const headers = { ...clientReq.headers, host: `${wslIp}:${TARGET_PORT}` };
+    const headers = { ...clientReq.headers, host: `${wslIp}:${targetPort}` };
     const proxyReq = http.request(
       {
         hostname: wslIp,
-        port: TARGET_PORT,
+        port: targetPort,
         path: clientReq.url,
         method: clientReq.method,
         headers,
@@ -107,13 +96,13 @@ async function main() {
     );
     proxyReq.on('error', (err) => {
       clientRes.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
-      clientRes.end(`Hermes proxy: ${err.message}`);
+      clientRes.end(`Hermes ${name} proxy: ${err.message}`);
     });
     clientReq.pipe(proxyReq);
   });
 
   server.on('upgrade', (req, clientSocket, head) => {
-    const upstream = net.connect(TARGET_PORT, wslIp, () => {
+    const upstream = net.connect(targetPort, wslIp, () => {
       let raw = `${req.method} ${req.url} HTTP/1.1\r\n`;
       for (const [key, value] of Object.entries(req.headers)) {
         raw += `${key}: ${value}\r\n`;
@@ -130,17 +119,54 @@ async function main() {
 
   server.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
-      log(`Port ${LISTEN_PORT} belegt — vermutlich läuft Proxy bereits.`);
+      log(`Port ${listenPort} belegt — vermutlich läuft Proxy bereits.`);
       process.exit(0);
     }
-    log(`FATAL: ${err.message}`);
+    log(`FATAL (${name}): ${err.message}`);
     process.exit(1);
   });
 
-  server.listen(LISTEN_PORT, LISTEN_HOST, () => {
-    writePid();
-    log(`http://${LISTEN_HOST}:${LISTEN_PORT} -> ${targetBase}`);
-  });
+  return server;
+}
+
+async function main() {
+  if (process.platform !== 'win32') {
+    log('Nur unter Windows nötig — in WSL direkt 127.0.0.1:9119 nutzen.');
+    process.exit(0);
+  }
+
+  stopPrevious();
+
+  const wslIp = getWslIp();
+  log(`WSL IP erkannt: ${wslIp}`);
+
+  const servers = [];
+
+  for (const config of PORTS_TO_PROXY) {
+    const { listenPort, targetPort, name } = config;
+    const targetUrl = `http://${wslIp}:${targetPort}/`;
+    
+    // Bei Gateway-Probe /v1/models nutzen, da / oft blockiert ist
+    const probeUrl = targetPort === 8642 ? `http://${wslIp}:${targetPort}/v1/models` : targetUrl;
+    
+    if (!(await probeHttp(probeUrl))) {
+      log(`${name} in WSL nicht erreichbar (${probeUrl}) — überspringe Proxy.`);
+      continue;
+    }
+
+    const server = createProxyServer(listenPort, targetPort, wslIp, name);
+    server.listen(listenPort, LISTEN_HOST, () => {
+      log(`Proxy aktiv: http://${LISTEN_HOST}:${listenPort} -> http://${wslIp}:${targetPort} (${name})`);
+    });
+    servers.push(server);
+  }
+
+  if (servers.length === 0) {
+    log('Keine aktiven WSL-Dienste für Proxy gefunden.');
+    process.exit(1);
+  }
+
+  writePid();
 
   const shutdown = () => {
     try {
@@ -148,7 +174,16 @@ async function main() {
     } catch {
       /* ignore */
     }
-    server.close(() => process.exit(0));
+    let closed = 0;
+    for (const server of servers) {
+      server.close(() => {
+        closed++;
+        if (closed === servers.length) {
+          process.exit(0);
+        }
+      });
+    }
+    setTimeout(() => process.exit(0), 1000);
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

@@ -1136,7 +1136,7 @@ async def capture_screen(context: RunContext) -> str:
                     "Accept-Encoding": "identity"
                 },
                 json={
-                    "model": "gpt-4o",
+                    "model": "gpt-4o-mini",
                     "messages": [
                         {
                             "role": "user",
@@ -1521,7 +1521,7 @@ async def capture_webcam(context: RunContext, camera_index: int = 0) -> str:
         }
         
         payload = {
-            "model": "gpt-4o",
+            "model": "gpt-4o-mini",
             "messages": [
                 {
                     "role": "user",
@@ -3501,6 +3501,254 @@ async def trigger_self_healing_workflow(context: RunContext, error_message: str,
     return await run_self_healing(context, error_message, target_file)
 
 @function_tool()
+async def trigger_system_analysis_and_repair(context: RunContext) -> str:
+    """Führt eine systemweite Diagnose des Elite Desktop Agents und des Windows/WSL-Systems aus.
+    Erstellt einen detaillierten Bericht im Markdown-Format (.md) auf dem Desktop des Nutzers.
+    Falls dabei Fehler oder Exception-Tracebacks in den Logdateien oder bei App-Checks gefunden werden,
+    wird die Selbstheilung (trigger_self_healing_workflow) automatisch für diese Fehler gestartet.
+    """
+    await emit_log(context, "thinking", "Starte systemweite Diagnose und Analyse...")
+    
+    desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # 1. Systemressourcen
+    cpu_usage = psutil.cpu_percent(interval=0.1)
+    ram = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
+    processes = len(psutil.pids())
+    
+    ram_used = f"{ram.used / (1024**3):.1f} GB"
+    ram_total = f"{ram.total / (1024**3):.1f} GB"
+    
+    # Port-Prüfung
+    import socket
+    def check_port(p: int) -> bool:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.3)
+                s.connect(("127.0.0.1", p))
+                return True
+        except:
+            return False
+            
+    port_9119 = check_port(9119)
+    port_8642 = check_port(8642)
+    port_11434 = check_port(11434)
+    port_7880 = check_port(7880)
+    
+    p9119_status = "AKTIV (Online)" if port_9119 else "OFFLINE (Nicht erreichbar)"
+    p8642_status = "AKTIV (Online)" if port_8642 else "OFFLINE (Nicht erreichbar)"
+    p11434_status = "AKTIV (Online)" if port_11434 else "OFFLINE (Ollama läuft eventuell nicht)"
+    p7880_status = "AKTIV (Online)" if port_7880 else "OFFLINE (Livekit Local)"
+    
+    # 2. WSL Status
+    wsl_avail = False
+    wsl_distros = "Keine aktiven Distros oder WSL gestoppt."
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "wsl.exe", "--list", "--running",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            wsl_avail = True
+            output = stdout.decode("utf-16", errors="replace").strip()
+            if not output:
+                output = stdout.decode("utf-8", errors="replace").strip()
+            wsl_distros = output if output else "Keine aktiven Distros."
+        else:
+            wsl_avail = True
+    except:
+        pass
+        
+    wsl_status_str = "Verfügbar" if wsl_avail else "Nicht installiert / nicht verfügbar"
+    
+    # 3. Python Syntax-Check für die Kern-App-Dateien
+    import py_compile
+    py_errors = []
+    files_to_check = [
+        "backend/agent.py",
+        "backend/tools.py",
+        "backend/self_healing.py",
+        "backend/self_learning.py"
+    ]
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    for f_path in files_to_check:
+        abs_path = os.path.join(base_dir, f_path)
+        if os.path.isfile(abs_path):
+            try:
+                py_compile.compile(abs_path, doraise=True)
+            except Exception as e:
+                py_errors.append(f"- **{f_path}**: Syntaxfehler: {str(e)}")
+                
+    python_check_str = "Alle Backend-Dateien syntaktisch korrekt." if not py_errors else "\n".join(py_errors)
+    
+    # 4. Log-Datei-Inspektion (Tracebacks finden)
+    tracebacks_found = []
+    log_files = []
+    
+    # Desktop
+    if os.path.isdir(desktop_path):
+        for f in os.listdir(desktop_path):
+            if f.endswith(".log") and "elite" in f.lower():
+                log_files.append(os.path.join(desktop_path, f))
+                
+    # Projektordner
+    for f in os.listdir(base_dir):
+        if f.endswith(".log") and "elite" in f.lower():
+            log_files.append(os.path.join(base_dir, f))
+            
+    # Eindeutige Pfade
+    log_files = list(set(log_files))
+    
+    for l_file in log_files:
+        try:
+            with open(l_file, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()[-400:] # Die letzten 400 Zeilen
+                
+                # Traceback-Blöcke finden
+                tb_blocks = []
+                current_tb = []
+                in_tb = False
+                for line in lines:
+                    if "Traceback (most recent call last):" in line:
+                        if current_tb:
+                            tb_blocks.append("".join(current_tb))
+                        current_tb = [line]
+                        in_tb = True
+                    elif in_tb:
+                        current_tb.append(line)
+                        if re.match(r"^[A-Za-z_]\w*(?:Error|Exception|Interrupt|Exit|Warning|KeyError|NameError|TypeError|ValueError|AttributeError|FileNotFoundError|RuntimeError|ImportError):", line) or (len(current_tb) > 25 and not line.startswith(" ")):
+                            tb_blocks.append("".join(current_tb))
+                            current_tb = []
+                            in_tb = False
+                if current_tb:
+                    tb_blocks.append("".join(current_tb))
+                    
+                for tb in tb_blocks:
+                    tracebacks_found.append({
+                        "text": tb.strip(),
+                        "file": l_file
+                    })
+        except Exception as le:
+            logger.warning(f"Konnte Log-Datei {l_file} nicht lesen: {le}")
+            
+    if tracebacks_found:
+        log_analysis_str = "### Gefundene Ausnahmefehler (Tracebacks):\n"
+        for idx, tb in enumerate(tracebacks_found, 1):
+            log_analysis_str += f"\n#### Fehler #{idx} (Quelle: {os.path.basename(tb['file'])}):\n```python\n{tb['text']}\n```\n"
+    else:
+        log_analysis_str = "Keine Python-Ausnahmefehler (Tracebacks) in den letzten Log-Einträgen gefunden."
+        
+    # 5. Reparatur-Maßnahmen / Selbstheilung
+    repair_actions = []
+    triggered_healing = False
+    
+    # Falls Python-Syntax-Fehler vorliegen
+    for py_err in py_errors:
+        m = re.match(r"- \*\*([^*]+)\*\*: (.*)", py_err)
+        if m:
+            err_file = m.group(1).strip()
+            err_msg = m.group(2).strip()
+            repair_actions.append(f"Starte Selbstheilung für Syntaxfehler in `{err_file}`...")
+            from self_healing import run_self_healing
+            healing_res = await run_self_healing(context, err_msg, os.path.join(base_dir, err_file))
+            repair_actions.append(f"**Ergebnis der Selbstheilung**: {healing_res}")
+            triggered_healing = True
+            
+    # Falls Tracebacks in Logs gefunden wurden
+    if not triggered_healing and tracebacks_found:
+        # Nehme den neuesten/letzten Traceback für die Reparatur
+        newest_tb = tracebacks_found[-1]
+        tb_text = newest_tb["text"]
+        
+        from self_healing import extract_file_from_traceback, run_self_healing
+        target_file = extract_file_from_traceback(tb_text)
+        
+        if target_file:
+            repair_actions.append(f"Gefundener Traceback wird repariert. Betroffene Datei: `{target_file}`.\nFehlermeldung:\n{tb_text[:200]}...")
+            healing_res = await run_self_healing(context, tb_text, target_file)
+            repair_actions.append(f"**Ergebnis der Selbstheilung**: {healing_res}")
+            triggered_healing = True
+        else:
+            repair_actions.append(f"Traceback gefunden, aber Zieldatei konnte nicht automatisch ermittelt werden. Manuelle Intervention empfohlen.")
+            
+    if not triggered_healing:
+        if not port_9119 or not port_8642:
+            repair_actions.append("Einige Hermes-Dienste (Port 9119 oder 8642) scheinen offline zu sein. Versuche die Dienste automatisch zu starten...")
+            try:
+                ps_script_path = os.path.join(base_dir, "scripts", "start-hermes-gateway.ps1")
+                if os.path.isfile(ps_script_path):
+                    proc = await asyncio.create_subprocess_exec(
+                        "powershell.exe", "-ExecutionPolicy", "Bypass", "-File", ps_script_path,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    await proc.wait()
+                    repair_actions.append("Start-Befehl für `start-hermes-gateway.ps1` wurde abgesetzt.")
+                else:
+                    repair_actions.append("Start-Skript `start-hermes-gateway.ps1` nicht gefunden.")
+            except Exception as se:
+                repair_actions.append(f"Dienststart fehlgeschlagen: {se}")
+        else:
+            repair_actions.append("Keine Fehler gefunden. System-Integrität ist nominal.")
+            
+    repair_actions_str = "\n".join(repair_actions)
+    
+    # 6. Bericht auf Desktop speichern
+    report_md = f"""# 🛠️ Jarvis Systemreparatur & Analyse-Bericht
+
+Dieses Dokument wurde automatisch von Elite / Jarvis generiert.
+**Erstellungszeitpunkt**: {timestamp}
+
+## 📊 System-Ressourcen
+- **CPU-Auslastung**: {cpu_usage}%
+- **RAM-Auslastung**: {ram.percent}% ({ram_used} von {ram_total})
+- **Festplatte**: {disk.percent}% belegt
+- **Prozesse**: {processes} aktive Tasks
+
+## 🌐 Netzwerk & Ports (Core-Dienste)
+- **Port 9119 (Hermes Dashboard Proxy)**: {p9119_status}
+- **Port 8642 (Hermes Gateway Proxy)**: {p8642_status}
+- **Port 11434 (Ollama / Local LLM)**: {p11434_status}
+- **Port 7880 (Livekit Server)**: {p7880_status}
+
+## 🐧 WSL-Status
+- **WSL-Verfügbarkeit**: {wsl_status_str}
+- **Aktive Linux-Distributionen**:
+```
+{wsl_distros}
+```
+
+## 📂 Code- & Build-Integrität
+- **Python Syntax-Check**:
+{python_check_str}
+
+## 📝 Fehleranalyse & Log-Inspektion
+{log_analysis_str}
+
+## 🔧 Durchgeführte / Empfohlene Reparaturmaßnahmen
+{repair_actions_str}
+"""
+    
+    report_path = os.path.join(desktop_path, "Systemreparatur_Analyse.md")
+    try:
+        with open(report_path, "w", encoding="utf-8") as rf:
+            rf.write(report_md)
+        await emit_log(context, "result", f"Systembericht gespeichert unter: {report_path}")
+        result_msg = f"Systemanalyse abgeschlossen. Bericht wurde auf dem Desktop unter 'Systemreparatur_Analyse.md' gespeichert."
+        if triggered_healing:
+            result_msg += " Ein Fehler wurde gefunden und die Selbstheilung wurde gestartet. Siehe Bericht für Details."
+        else:
+            result_msg += " Es wurden keine kritischen Ausnahmefehler zur Reparatur gefunden."
+        return result_msg
+    except Exception as re_err:
+        logger.error(f"Konnte Bericht nicht speichern: {re_err}")
+        return f"Systemanalyse abgeschlossen, aber der Bericht konnte nicht auf dem Desktop gespeichert werden ({re_err})."
+
+@function_tool()
 async def trigger_learning_cycle(context: RunContext) -> str:
     """Startet einen kollaborativen Selbstlern-Zyklus, bei dem Agenten die Log-Dateien, die Konversations-Historie
     und die Benutzer-Präferenzen analysieren, um das Verhalten zu optimieren, gelernte Lektionen in der PAI-Gedächtnisdatenbank
@@ -3512,6 +3760,7 @@ async def trigger_learning_cycle(context: RunContext) -> str:
 # Alle Tools als Liste exportieren (wird in agent.py importiert)
 ALL_TOOLS = [
     trigger_self_healing_workflow,
+    trigger_system_analysis_and_repair,
     trigger_learning_cycle,
     research_topic,
     search_web,

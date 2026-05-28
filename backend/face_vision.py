@@ -42,7 +42,7 @@ async def analyze_face_aesthetics(frame_b64: str) -> dict:
     raw = _strip_data_url(frame_b64)
 
     payload = {
-        "model": os.environ.get("FACE_AESTHETICS_MODEL", "gpt-4o"),
+        "model": os.environ.get("FACE_AESTHETICS_MODEL", "gpt-4o-mini"),
         "messages": [
             {"role": "system", "content": FACE_AESTHETICS_SYSTEM_PROMPT},
             {

@@ -19,8 +19,16 @@ fi
 # --- Gateway (8642) ---
 wait_for_gateway() {
   local i=0
+  local key=""
+  if [ -f "${HERMES_HOME}/.env" ]; then
+    key=$(grep "^API_SERVER_KEY=" "${HERMES_HOME}/.env" | cut -d= -f2- | tr -d '"'\'' ' || true)
+  fi
+  local auth_hdr=()
+  if [ -n "$key" ]; then
+    auth_hdr=(-H "Authorization: Bearer $key")
+  fi
   while [ "$i" -lt 45 ]; do
-    if curl -sf -o /dev/null "http://127.0.0.1:8642/v1/models"; then
+    if curl -sf "${auth_hdr[@]}" -o /dev/null "http://127.0.0.1:8642/v1/models"; then
       return 0
     fi
     sleep 2

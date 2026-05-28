@@ -27,6 +27,7 @@ DEFAULT_CONFIG = {
     "offlineTtsEngine": "piper",
     "piperVoice": "de_DE-thorsten-high",
     "startupVoiceGreeting": True,
+    "realtimeModel": "gpt-realtime-mini",
 }
 
 
@@ -39,6 +40,8 @@ def write_agent_runtime_state(
     configured_llm_mode: str,
     effective_llm_mode: str,
     fallback_reason: str | None = None,
+    llm_stack_ready: bool | None = None,
+    llm_stack_message: str | None = None,
 ) -> None:
     """Schreibt effektiven KI-Modus für HUD/API (z. B. Quota-Fallback)."""
     path = resolve_runtime_state_path()
@@ -47,6 +50,8 @@ def write_agent_runtime_state(
         "configuredLlmMode": configured_llm_mode,
         "effectiveLlmMode": effective_llm_mode,
         "llmFallbackReason": fallback_reason,
+        "llmStackReady": llm_stack_ready,
+        "llmStackMessage": llm_stack_message,
         "updatedAt": datetime.now(timezone.utc).isoformat(),
     }
     try:
@@ -173,7 +178,7 @@ def resolve_effective_llm_mode(config: dict | None = None) -> tuple[str, str | N
 def _ollama_tags(base_url: str) -> list[str]:
     root = str(base_url or "http://127.0.0.1:11434/v1").rstrip("/").replace("/v1", "")
     try:
-        with urllib.request.urlopen(f"{root}/api/tags", timeout=3) as resp:
+        with urllib.request.urlopen(f"{root}/api/tags", timeout=2) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         names: list[str] = []
         for item in data.get("models") or []:
@@ -181,9 +186,33 @@ def _ollama_tags(base_url: str) -> list[str]:
             if name:
                 names.append(name)
         return names
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
-        logger.warning("Ollama /api/tags nicht erreichbar (%s): %s", root, e)
-        return []
+    except Exception:
+        pass
+
+    # Fallback auf WSL, falls aktiviert
+    try:
+        from hermes_config import get_wsl_distro, should_use_wsl
+        if should_use_wsl():
+            distro = get_wsl_distro()
+            import subprocess
+            r = subprocess.run(
+                ["wsl.exe", "-d", distro, "-e", "curl", "-s", "http://127.0.0.1:11434/api/tags"],
+                capture_output=True,
+                timeout=5,
+                check=False
+            )
+            if r.returncode == 0:
+                data = json.loads(r.stdout.decode("utf-8", errors="ignore"))
+                names = []
+                for item in data.get("models") or []:
+                    name = str(item.get("name") or "").strip()
+                    if name:
+                        names.append(name)
+                return names
+    except Exception as e:
+        logger.warning("WSL Ollama tags probe failed: %s", e)
+
+    return []
 
 
 def _normalize_ollama_name(name: str) -> str:
@@ -221,3 +250,36 @@ def resolve_ollama_model(config: dict | None = None) -> tuple[str, str]:
 
 def cloud_api_key_present() -> bool:
     return bool(os.environ.get("OPENAI_API_KEY", "").strip())
+
+
+def validate_llm_stack(config: dict | None = None) -> tuple[bool, str, str, str | None]:
+    """
+    Prüft, ob der effektive LLM-Stack nutzbar ist.
+    Returns: (ok, effective_mode, user_message, fallback_reason)
+    """
+    cfg = config or load_config()
+    effective, fallback = resolve_effective_llm_mode(cfg)
+
+    if effective == "cloud":
+        return True, effective, "", fallback
+
+    preferred = str(cfg.get("ollamaModel") or "llama3.1").strip()
+    _, base_url = resolve_ollama_model(cfg)
+    if _ollama_tags(base_url):
+        return True, effective, "", fallback
+
+    if fallback == "insufficient_quota":
+        msg = (
+            "OpenAI-Guthaben aufgebraucht und Ollama ist nicht erreichbar (Port 11434). "
+            f"API-Guthaben aufladen oder: ollama serve && ollama pull {preferred}"
+        )
+    elif not cloud_api_key_present() and resolve_llm_mode(cfg) == "local":
+        msg = (
+            f"Offline-KI: Ollama nicht erreichbar. Starte: ollama serve && ollama pull {preferred}"
+        )
+    else:
+        msg = (
+            "Ollama-Fallback nicht verfügbar (127.0.0.1:11434). "
+            "OpenAI-API prüfen oder Ollama starten."
+        )
+    return False, effective, msg, fallback or "ollama_offline"

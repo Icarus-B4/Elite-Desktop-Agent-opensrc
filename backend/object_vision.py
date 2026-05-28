@@ -111,7 +111,7 @@ async def _detect_openai(frame_b64: str) -> list[dict]:
         return []
 
     raw = _strip_data_url(frame_b64)
-    model = os.environ.get("OBJECT_VISION_MODEL", "gpt-4o")
+    model = os.environ.get("OBJECT_VISION_MODEL", "gpt-4o-mini")
     payload = {
         "model": model,
         "messages": [

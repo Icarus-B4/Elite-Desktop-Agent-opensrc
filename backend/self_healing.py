@@ -337,23 +337,68 @@ async def emit_healing_log(context: Any, log_type: str, message: str) -> None:
 
 async def call_chat_api(prompt: str, system_prompt: str) -> str:
     """Ruft die Chat-API (Cloud/OpenAI oder Lokal/Ollama) basierend auf der Konfiguration auf."""
-    from elite_config import load_config, resolve_llm_mode
+    from elite_config import load_config, resolve_effective_llm_mode, resolve_ollama_model
     config = load_config()
-    llm_mode = resolve_llm_mode(config)
+    llm_mode, _ = resolve_effective_llm_mode(config)
     
     if llm_mode == "local":
-        base_url = config.get("ollamaBaseUrl", "http://127.0.0.1:11434/v1")
-        model = config.get("ollamaModel", "llama3.1")
-        url = f"{base_url.rstrip('/')}/chat/completions"
+        model, base_url = resolve_ollama_model(config)
+        root_url = base_url.rstrip('/').replace('/v1', '')
+        url = f"{root_url}/api/chat"
         payload = {
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
             ],
-            "temperature": 0.2
+            "stream": False
         }
         headers = {"Content-Type": "application/json"}
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data["message"]["content"]
+                    else:
+                        err_text = await resp.text()
+                        raise Exception(f"Ollama HTTP {resp.status}: {err_text}")
+        except Exception as direct_err:
+            from hermes_config import should_use_wsl, get_wsl_distro
+            if should_use_wsl():
+                distro = get_wsl_distro()
+                import json
+                import asyncio
+                payload_str = json.dumps(payload)
+                curl_cmd = f"curl -s -X POST -H 'Content-Type: application/json' -d @- http://127.0.0.1:11434/api/chat"
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        "wsl.exe",
+                        "-d",
+                        distro,
+                        "-e",
+                        "bash",
+                        "-lc",
+                        curl_cmd,
+                        stdin=asyncio.subprocess.PIPE,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout, stderr = await asyncio.wait_for(
+                        proc.communicate(input=payload_str.encode("utf-8")),
+                        timeout=120,
+                    )
+                    if proc.returncode == 0:
+                        data = json.loads(stdout.decode("utf-8", errors="ignore"))
+                        return data["message"]["content"]
+                    else:
+                        err_msg = stderr.decode("utf-8", errors="ignore").strip()
+                        raise Exception(f"WSL curl error (exit {proc.returncode}): {err_msg}")
+                except Exception as wsl_err:
+                    raise Exception(f"Local LLM call failed. Windows direct error: {direct_err}. WSL fallback error: {wsl_err}")
+            else:
+                raise direct_err
     else:
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
@@ -372,14 +417,14 @@ async def call_chat_api(prompt: str, system_prompt: str) -> str:
             "Authorization": f"Bearer {api_key}"
         }
         
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, headers=headers) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return data["choices"][0]["message"]["content"]
-            else:
-                err_text = await resp.text()
-                raise Exception(f"LLM API Error (HTTP {resp.status}): {err_text}")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data["choices"][0]["message"]["content"]
+                else:
+                    err_text = await resp.text()
+                    raise Exception(f"LLM API Error (HTTP {resp.status}): {err_text}")
 
 def _get_search_roots() -> list[str]:
     """Liefert alle bekannten Projekt-Wurzelverzeichnisse für die Dateisuche."""

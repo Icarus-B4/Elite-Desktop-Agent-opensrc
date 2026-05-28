@@ -229,7 +229,7 @@ async def _llm_cad_code(prompt: str, prior_code: str = "") -> str:
                 return data["candidates"][0]["content"]["parts"][0]["text"]
     if openai_key:
         payload = {
-            "model": os.environ.get("ELITE_CAD_MODEL", "gpt-4.1-mini"),
+            "model": os.environ.get("ELITE_CAD_MODEL", "gpt-4o-mini"),
             "messages": [
                 {"role": "system", "content": CAD_SYSTEM},
                 {"role": "user", "content": user},

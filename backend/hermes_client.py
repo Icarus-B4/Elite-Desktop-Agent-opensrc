@@ -84,7 +84,11 @@ async def _probe_hermes_via_wsl(url: str, timeout_seconds: float) -> bool:
         return False
     distro = get_wsl_distro()
     timeout_sec = max(2, int(timeout_seconds))
-    cmd = f"curl -sf -o /dev/null --connect-timeout {timeout_sec} {_shell_single_quote(url)}"
+    headers = _build_headers()
+    header_flags = " ".join(
+        f"-H {_shell_single_quote(f'{k}: {v}')}" for k, v in headers.items()
+    )
+    cmd = f"curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout {timeout_sec} {header_flags} {_shell_single_quote(url)}"
     try:
         proc = await asyncio.create_subprocess_exec(
             "wsl.exe",
@@ -94,11 +98,18 @@ async def _probe_hermes_via_wsl(url: str, timeout_seconds: float) -> bool:
             "bash",
             "-lc",
             cmd,
-            stdout=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        await asyncio.wait_for(proc.wait(), timeout=timeout_seconds + 4)
-        return proc.returncode == 0
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds + 4)
+        if proc.returncode == 0:
+            status_code = stdout.decode("utf-8", errors="ignore").strip()
+            try:
+                code = int(status_code)
+                return 200 <= code < 600
+            except ValueError:
+                return False
+        return False
     except (asyncio.TimeoutError, OSError) as exc:
         logger.debug("Hermes WSL probe failed: %s", exc)
         return False
@@ -223,11 +234,12 @@ async def hermes_chat(
 
 async def probe_hermes_gateway(timeout_seconds: float = 2.0) -> bool:
     url = f"{get_hermes_gateway_url()}/v1/models"
+    headers = _build_headers()
     try:
         timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=timeout) as resp:
-                if resp.status == 200:
+            async with session.get(url, headers=headers, timeout=timeout) as resp:
+                if 200 <= resp.status < 600:
                     return True
     except Exception:
         pass

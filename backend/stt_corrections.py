@@ -51,6 +51,11 @@ def apply_german_stt_corrections(text: str) -> str:
 
     corrected = re.sub(r"\böffnet\b", "öffne", corrected)
 
+    # Phonetische Korrekturen für Schweizerdeutsch & Whisper-Fehlhörer
+    corrected = re.sub(r"\b(klon\s*jobs?|klon\s*jops?)\b", "cronjob", corrected)
+    corrected = re.sub(r"\bhermit\b", "hermes", corrected)
+    corrected = re.sub(r"\bläden\b", "leeren", corrected)
+
     if corrected != t:
         return corrected
     return original

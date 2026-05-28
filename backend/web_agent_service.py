@@ -77,7 +77,7 @@ async def _openai_step(task: str, screenshot_b64: str, url: str) -> dict:
     if not key:
         return {"action": "done", "summary": f"Seite geladen: {url}. Kein OpenAI für weitere Schritte."}
     payload = {
-        "model": os.environ.get("ELITE_WEB_AGENT_MODEL", "gpt-4.1-mini"),
+        "model": os.environ.get("ELITE_WEB_AGENT_MODEL", "gpt-4o-mini"),
         "messages": [
             {
                 "role": "user",
