@@ -14,7 +14,7 @@ from paths import get_writable_path
 
 logger = logging.getLogger("elite-piper-tts")
 
-DEFAULT_PIPER_VOICE = "de_DE-thorsten-high"
+DEFAULT_PIPER_VOICE = "de_DE-ramona-medium"
 OUTPUT_SAMPLE_RATE = 24000
 NUM_CHANNELS = 1
 

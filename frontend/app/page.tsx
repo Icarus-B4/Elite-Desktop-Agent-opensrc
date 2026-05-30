@@ -33,6 +33,7 @@ import { LiveKitRateLimitBridge } from '@/components/livekit-rate-limit-bridge';
 import { SafeVoiceOrb } from '@/components/safe-voice-orb';
 import { GridBackground } from '@/components/grid-background';
 import { useAudioAnalyzer, getAudioContext } from '@/hooks/use-audio-analyzer';
+import { useClapDetector } from '@/hooks/use-clap-detector';
 import { requestMicrophonePermission } from '@/lib/microphone-access';
 import { useIsElectron } from '@/hooks/use-is-electron';
 import { HudDecorators } from '@/components/hud-decorators';
@@ -68,6 +69,13 @@ import {
   HERMES_SESSION_STORAGE_KEY,
   sendHermesChat,
 } from '@/lib/hermes-chat-client';
+import {
+  dispatchChatCleared,
+  ELITE_CHAT_HISTORY_KEY,
+  getChatClearedAt,
+  shouldMigrateHermesChat,
+  type ChatClearedDetail,
+} from '@/lib/chat-storage';
 import { parseUnifiedChatInput, UNIFIED_CHAT_PLACEHOLDER } from '@/lib/unified-chat-router';
 import { useToast } from '@/components/dashboard/toast-provider';
 import { ELITE_LIVEKIT_ROOM } from '@/lib/elite-livekit';
@@ -269,6 +277,9 @@ function LiveKitPageContent() {
   const autoConnectAttemptedRef = useRef(false);
   const connectInFlightRef = useRef<Promise<void> | null>(null);
   const [isHardwareInitializing, setIsHardwareInitializing] = useState(false);
+  // Automatischer Reconnect nach Disconnect (zählt Versuche für Backoff)
+  const disconnectCountRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [showSettings, setShowSettings] = useState(false);
   const [livekitMode, setLivekitMode] = useState<'cloud' | 'local'>('cloud');
@@ -304,7 +315,13 @@ function LiveKitPageContent() {
     };
     checkStatus();
     const interval = setInterval(checkStatus, 12_000);
-    return () => clearInterval(interval);
+    const unsubRepair = window.eliteAPI?.onRuntimeRepaired?.(() => {
+      checkStatus();
+    });
+    return () => {
+      clearInterval(interval);
+      unsubRepair?.();
+    };
   }, []);
 
   // Load settings
@@ -563,19 +580,32 @@ function LiveKitPageContent() {
 
   const liveKitConnectOptions = useMemo<RoomConnectOptions>(() => ({ maxRetries: 0 }), []);
 
-  // Auto-Connect nur einmal pro Seitenladung (verhindert 429-Sturm nach Fehlschlag)
+  // Auto-Connect + Auto-Reconnect (nach Disconnect mit Backoff)
   useEffect(() => {
     if (autoConnectAttemptedRef.current || token || isConnecting || !isEliteOnline) return;
     if (isLiveKitRateLimited()) {
       setRateLimitRemainingMs(getLiveKitRateLimitRemainingMs());
       return;
     }
-    const timer = window.setTimeout(() => {
+    // Maximale Reconnect-Versuche bevor manueller Eingriff nötig ist
+    const MAX_RECONNECT_ATTEMPTS = 5;
+    const dc = disconnectCountRef.current;
+    if (dc > MAX_RECONNECT_ATTEMPTS) {
+      console.warn(`[Elite] Maximale Reconnect-Versuche (${MAX_RECONNECT_ATTEMPTS}) erreicht. Manueller Neustart nötig.`);
+      return;
+    }
+    // Backoff-Berechnung: Erstverbindung 1.8s, Reconnects 5s → 10s → 20s → 40s → 60s
+    const delay = dc === 0 ? 1800 : Math.min(5000 * Math.pow(2, dc - 1), 60_000);
+    console.log(`[Elite] Auto-Connect geplant in ${Math.round(delay / 1000)}s (Versuch #${dc})`);
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = setTimeout(() => {
       if (autoConnectAttemptedRef.current || token || isConnecting) return;
       autoConnectAttemptedRef.current = true;
       void onConnect();
-    }, 1800);
-    return () => window.clearTimeout(timer);
+    }, delay);
+    return () => {
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    };
   }, [isEliteOnline, token, isConnecting, onConnect]);
 
   useEffect(() => {
@@ -763,12 +793,19 @@ function LiveKitPageContent() {
                   clearLiveKitRateLimit();
                   setRateLimitRemainingMs(0);
                   setIsConnecting(false);
+                  // Reconnect-Zähler bei erfolgreicher Verbindung zurücksetzen
+                  disconnectCountRef.current = 0;
                 }}
                 onDisconnected={() => {
                   setToken(null);
                   setRoomName(null);
                   setIsConnecting(false);
                   sessionStorage.removeItem('elite-session-active');
+                  // Auto-Reconnect vorbereiten
+                  disconnectCountRef.current += 1;
+                  autoConnectAttemptedRef.current = false;
+                  console.warn(`[Elite] Disconnect #${disconnectCountRef.current} – Auto-Reconnect wird geplant...`);
+                  addLog({ type: 'system', message: `Verbindung getrennt. Auto-Reconnect wird versucht (#${disconnectCountRef.current})...` });
                 }}
                 onError={handleLiveKitError}
                 options={{
@@ -972,8 +1009,7 @@ function LiveKitPageContent() {
   );
 }
 
-// LocalStorage Key für Chat-Persistenz
-const CHAT_STORAGE_KEY = 'elite-chat-history';
+const CHAT_STORAGE_KEY = ELITE_CHAT_HISTORY_KEY;
 
 // Typ-Definition für eine Chat-Nachricht (Chat + Voice-Transkription)
 type CombinedMessage = {
@@ -1498,6 +1534,12 @@ function SupportInterface({
   const [hermesSessionId, setHermesSessionId] = useState<string | null>(null);
   const [hermesSending, setHermesSending] = useState(false);
   const hermesApiHistoryRef = useRef<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
+  const liveKitChatBaselineRef = useRef(0);
+  const transcriptionBaselineRef = useRef(0);
+  const chatMessagesLenRef = useRef(0);
+  const transcriptionsLenRef = useRef(0);
+  chatMessagesLenRef.current = chatMessages.length;
+  transcriptionsLenRef.current = transcriptions.length;
   const [rejectedTranscripts, setRejectedTranscripts] = useState<Set<string>>(new Set());
 
   // Listen to voice rejections from the backend to clean up chat transcripts
@@ -1530,7 +1572,7 @@ function SupportInterface({
     if (typeof window === 'undefined') return [];
     try {
       const stored = localStorage.getItem(CHAT_STORAGE_KEY);
-      const clearedAtVal = parseInt(localStorage.getItem('elite-chat-cleared-at') || '0');
+      const clearedAtVal = getChatClearedAt();
       const messages: CombinedMessage[] = stored ? JSON.parse(stored) : [];
       return messages.filter(m => m.timestamp > clearedAtVal);
     } catch {
@@ -1539,15 +1581,14 @@ function SupportInterface({
   });
 
   // Merke den Zeitpunkt des Löschens – nur neuere Nachrichten werden danach angezeigt
-  const [clearedAt, setClearedAt] = useState<number>(() => {
-    if (typeof window === 'undefined') return 0;
-    const val = localStorage.getItem('elite-chat-cleared-at');
-    return val ? parseInt(val) || 0 : 0;
-  });
+  const [clearedAt, setClearedAt] = useState<number>(() =>
+    typeof window === 'undefined' ? 0 : getChatClearedAt(),
+  );
 
-  // Hermes-Verlauf aus Widget-Chat migrieren (einmalig)
+  // Hermes-Verlauf aus Widget-Chat migrieren (nur wenn nicht zuvor global gelöscht)
   useEffect(() => {
     setHermesSessionId(localStorage.getItem(HERMES_SESSION_STORAGE_KEY));
+    if (!shouldMigrateHermesChat()) return;
     try {
       const raw = localStorage.getItem(HERMES_CHAT_STORAGE_KEY);
       if (!raw) return;
@@ -1575,7 +1616,10 @@ function SupportInterface({
   }, []);
 
   useEffect(() => {
-    if (hermesMessages.length === 0) return;
+    if (hermesMessages.length === 0) {
+      localStorage.removeItem(HERMES_CHAT_STORAGE_KEY);
+      return;
+    }
     const persist = hermesMessages
       .filter((m) => !m.pending && m.text.trim())
       .slice(-80)
@@ -1622,6 +1666,7 @@ function SupportInterface({
     }
 
     chatMessages.forEach((msg, i) => {
+      if (i < liveKitChatBaselineRef.current) return;
       const ts = normalizeMessageTimestamp(
         msg.timestamp,
         now - (chatMessages.length - 1 - i) * 50,
@@ -1638,6 +1683,7 @@ function SupportInterface({
 
     const transcriptionById = new Map<string, OrderedMessage>();
     transcriptions.forEach((segment, i) => {
+      if (i < transcriptionBaselineRef.current) return;
       if (!segment.text?.trim()) return;
       const identity = segment.participantInfo?.identity ?? 'unknown';
       const isAgent = identity.includes('agent');
@@ -1694,6 +1740,7 @@ function SupportInterface({
     messages.push(...Array.from(transcriptionById.values()));
 
     for (const msg of hermesMessages) {
+      if (msg.pending && msg.timestamp <= clearedAt) continue;
       if (!includeTs(msg.timestamp)) continue;
       messages.push({ ...msg, order: order++ });
     }
@@ -1720,13 +1767,15 @@ function SupportInterface({
 
   // Neue Nachrichten automatisch in localStorage speichern
   useEffect(() => {
-    if (combinedMessages.length > 0) {
-      try {
-        const toSave = combinedMessages.slice(-100);
-        localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(toSave));
-      } catch {
-        // localStorage voll oder nicht verfügbar
-      }
+    if (combinedMessages.length === 0) {
+      localStorage.removeItem(CHAT_STORAGE_KEY);
+      return;
+    }
+    try {
+      const toSave = combinedMessages.slice(-100);
+      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(toSave));
+    } catch {
+      /* localStorage voll oder nicht verfügbar */
     }
   }, [combinedMessages]);
 
@@ -1780,27 +1829,33 @@ function SupportInterface({
     }
   }, [chatMessages]);
 
+  const applyInMemoryChatClear = useCallback((clearedAtTs: number) => {
+    liveKitChatBaselineRef.current = chatMessagesLenRef.current;
+    transcriptionBaselineRef.current = transcriptionsLenRef.current;
+    setSavedMessages([]);
+    setHermesMessages([]);
+    hermesApiHistoryRef.current = [];
+    setHermesSessionId(null);
+    setHermesSending(false);
+    setClearedAt(clearedAtTs);
+  }, []);
+
   // Chat-Verlauf löschen (lokal + global)
   const clearChatHistory = useCallback(() => {
-    localStorage.removeItem(CHAT_STORAGE_KEY);
-    localStorage.removeItem('elite-dashboard-chat');
-    const now = Date.now();
-    localStorage.setItem('elite-chat-cleared-at', now.toString());
-    setSavedMessages([]);
-    setClearedAt(now);
-  }, []);
+    const now = dispatchChatCleared();
+    applyInMemoryChatClear(now);
+  }, [applyInMemoryChatClear]);
 
   // Auf globales Lösch-Event reagieren (vom Toolbar-Button)
   useEffect(() => {
-    const handleClear = () => {
-      localStorage.removeItem(CHAT_STORAGE_KEY);
-      setSavedMessages([]);
-      const now = Date.now();
-      setClearedAt(now);
+    const handleClear = (e: Event) => {
+      const detail = (e as CustomEvent<ChatClearedDetail>).detail;
+      const now = detail?.clearedAt ?? (getChatClearedAt() || Date.now());
+      applyInMemoryChatClear(now);
     };
     window.addEventListener('chat-cleared', handleClear);
     return () => window.removeEventListener('chat-cleared', handleClear);
-  }, []);
+  }, [applyInMemoryChatClear]);
 
   // Audio Context aktivieren bei Benutzer-Interaktion
   useEffect(() => {
@@ -1892,7 +1947,9 @@ function SupportInterface({
           localStorage.setItem(HERMES_SESSION_STORAGE_KEY, newSession);
         }
 
-        const reply = content || '(leere Antwort)';
+        const reply =
+          content ||
+          '(Keine Textantwort — Gateway offline, Timeout oder leerer Stream. Hermes-Log prüfen.)';
         hermesApiHistoryRef.current = [
           ...apiMessages,
           { role: 'assistant' as const, content: reply },
@@ -1904,6 +1961,17 @@ function SupportInterface({
           ),
         );
         addLog({ type: 'system', message: `[Hermes] Antwort (${reply.length} Zeichen)` });
+
+        // Sprachausgabe antriggern, falls LiveKit verbunden ist
+        const api = (window as any).elite;
+        if (api?.sendDataChannel && content) {
+          api.sendDataChannel(
+            JSON.stringify({
+              type: 'hermes_speak',
+              text: content,
+            })
+          );
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         setHermesMessages((prev) => prev.filter((m) => m.id !== assistantId));
@@ -2121,7 +2189,7 @@ function SupportInterface({
                       <span className="text-[10px] font-black uppercase tracking-[0.18em] text-violet-300">
                         Hermes Agent
                       </span>
-                      {msg.pending ? (
+                      {msg.pending && !msg.text.trim() ? (
                         <Loader2 className="size-3 ml-auto animate-spin text-violet-400/80" />
                       ) : null}
                     </div>
@@ -2482,17 +2550,68 @@ function CustomVoiceControls({
   const { localParticipant } = useLocalParticipant();
   const room = useRoomContext();
   const { addLog } = useWidgetManager();
-  const [manualMute, setManualMute] = useState(false);
-  const [micTrack, setMicTrack] = useState<MediaStreamTrack | null>(null);
-  const autoMicStartedRef = useRef(false);
-  const micLiveRef = useRef(false);
-  const { levels: micAnalyzerLevels } = useAudioAnalyzer(micTrack);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [showMenu, setShowMenu] = useState(false);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>(() => {
     if (typeof window === 'undefined') return '';
     return localStorage.getItem('elite-mic-device') || '';
   });
+  const [manualMute, setManualMute] = useState(false);
+  const [hasMicPublication, setHasMicPublication] = useState(false);
+  const [micTrack, setMicTrack] = useState<MediaStreamTrack | null>(null);
+  const [localAnalyserTrack, setLocalAnalyserTrack] = useState<MediaStreamTrack | null>(null);
+  const autoMicStartedRef = useRef(false);
+  const micLiveRef = useRef(false);
+
+  useEffect(() => {
+    let active = true;
+    let localStream: MediaStream | null = null;
+
+    async function startLocalAnalyser() {
+      if (!hasMicPublication) {
+        setLocalAnalyserTrack((prev) => {
+          if (prev) prev.stop();
+          return null;
+        });
+        return;
+      }
+
+      try {
+        const constraints = selectedDeviceId
+          ? { audio: { deviceId: { exact: selectedDeviceId } } }
+          : { audio: true };
+        localStream = await navigator.mediaDevices.getUserMedia(constraints);
+        const track = localStream.getAudioTracks()[0];
+        if (active) {
+          setLocalAnalyserTrack(track);
+        } else {
+          track.stop();
+        }
+      } catch (err) {
+        console.warn("[Hardware] Fehler beim Starten des lokalen Analyser-Tracks:", err);
+      }
+    }
+
+    void startLocalAnalyser();
+
+    return () => {
+      active = false;
+      if (localStream) {
+        localStream.getTracks().forEach((t) => t.stop());
+      }
+    };
+  }, [hasMicPublication, selectedDeviceId]);
+
+  const { levels: micAnalyzerLevels } = useAudioAnalyzer(localAnalyserTrack);
+
+  useClapDetector(
+    localAnalyserTrack,
+    () => {
+      console.log("[ClapDetector] Double Clap triggert Mikrofon-Stummschaltung!");
+      void toggleMic();
+    },
+    !!localParticipant
+  );
   const isLoadedRef = useRef(false);
   const emitDebugLog = useCallback(
     (hypothesisId: string, location: string, message: string, data: Record<string, unknown> = {}) => {
@@ -2518,6 +2637,7 @@ function CustomVoiceControls({
   const syncMicTrack = useCallback(() => {
     if (!localParticipant) {
       setMicTrack((prev) => (prev === null ? prev : null));
+      setHasMicPublication(false);
       if (micLiveRef.current) {
         micLiveRef.current = false;
         onMicLiveChange?.(false);
@@ -2525,6 +2645,7 @@ function CustomVoiceControls({
       return;
     }
     const pub = localParticipant.getTrackPublication(Track.Source.Microphone);
+    setHasMicPublication(!!pub);
     const track = pub?.track?.mediaStreamTrack ?? null;
     const live =
       localParticipant.isMicrophoneEnabled &&
@@ -2739,44 +2860,63 @@ function CustomVoiceControls({
     const micActive = micLiveRef.current;
 
     try {
-      // Mic noch nie aktiv oder manuell aus → einschalten (Nutzer-Geste = Berechtigungsdialog)
+      // Wenn Mute aktiv war oder der Track inaktiv ist: Reaktivieren / Unmuten
       if (manualMute || !micActive) {
-        const perm = await requestMicrophonePermission();
-        if (!perm.ok) {
-          addLog({ type: 'error', message: perm.error ?? 'Mikrofon-Zugriff verweigert.' });
-          return;
-        }
+        const pub = localParticipant.getTrackPublication(Track.Source.Microphone);
+        if (pub) {
+          // Hardware bereits an -> Nur in LiveKit unmuten!
+          await pub.unmute();
+          setManualMute(false);
+          syncMicTrack();
+          playSystemSound('startup', 0.25);
+          addLog({
+            type: 'system',
+            message: 'Mikrofon AKTIV (Elite hört zu).',
+          });
+        } else {
+          // Hardware ist aus -> Vollständiger Berechtigungs- und Start-Workflow
+          const perm = await requestMicrophonePermission();
+          if (!perm.ok) {
+            addLog({ type: 'error', message: perm.error ?? 'Mikrofon-Zugriff verweigert.' });
+            return;
+          }
 
-        let deviceId = selectedDeviceId;
-        if (!deviceId) {
-          const inputs = (await navigator.mediaDevices.enumerateDevices()).filter(
-            (d) => d.kind === 'audioinput' && d.deviceId,
-          );
-          setDevices(inputs);
-          deviceId = pickPreferredDeviceId(inputs);
+          let deviceId = selectedDeviceId;
+          if (!deviceId) {
+            const inputs = (await navigator.mediaDevices.enumerateDevices()).filter(
+              (d) => d.kind === 'audioinput' && d.deviceId,
+            );
+            setDevices(inputs);
+            deviceId = pickPreferredDeviceId(inputs);
+          }
+          await enableMicrophone(deviceId || undefined, {
+            hardReset: true,
+            skipPermissionPrompt: true,
+          });
+          emitDebugLog('H2', 'frontend/app/page.tsx:2141', 'toggle-mic-enabled', {
+            manualMuteAfterEnable: false,
+            usedDeviceId: deviceId || null,
+          });
+          playSystemSound('startup', 0.25);
+          addLog({
+            type: 'system',
+            message: 'Mikro aktiv – „Elite“ + Befehl sprechen.',
+          });
         }
-        await enableMicrophone(deviceId || undefined, {
-          hardReset: true,
-          skipPermissionPrompt: true,
-        });
-        emitDebugLog('H2', 'frontend/app/page.tsx:2141', 'toggle-mic-enabled', {
-          manualMuteAfterEnable: false,
-          usedDeviceId: deviceId || null,
-        });
-        addLog({
-          type: 'system',
-          message: 'Mikro aktiv – „Elite“ + Befehl sprechen.',
-        });
       } else {
-        await localParticipant.setMicrophoneEnabled(false);
+        // Hardware an, aber Nutzer möchte stummschalten -> Nur in LiveKit muten!
+        const pub = localParticipant.getTrackPublication(Track.Source.Microphone);
+        if (pub) {
+          await pub.mute();
+        }
         setManualMute(true);
-        setMicTrack(null);
         micLiveRef.current = false;
         onMicLiveChange?.(false);
-        emitDebugLog('H2', 'frontend/app/page.tsx:2152', 'toggle-mic-disabled', {
+        emitDebugLog('H2', 'frontend/app/page.tsx:2152', 'toggle-mic-muted', {
           manualMuteAfterDisable: true,
         });
-        addLog({ type: 'system', message: 'Mikrofon manuell AUS.' });
+        playSystemSound('shutdown', 0.25);
+        addLog({ type: 'system', message: 'Mikrofon STUMM. (Double-Clap zum Aktivieren)' });
       }
     } catch (err: any) {
       emitDebugLog('H2', 'frontend/app/page.tsx:2155', 'toggle-mic-error', {

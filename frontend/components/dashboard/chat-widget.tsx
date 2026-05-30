@@ -1,10 +1,11 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, type ReactNode } from 'react';
 import { motion } from 'framer-motion';
 import {
   LiveKitRoom,
   RoomAudioRenderer,
+  useMaybeRoomContext,
   useVoiceAssistant,
   useChat,
   useTranscriptions,
@@ -26,6 +27,10 @@ import {
   WIDGET_TITLE_CLASS,
 } from './widget-shell';
 import { ELITE_LIVEKIT_ROOM } from '@/lib/elite-livekit';
+import {
+  ELITE_DASHBOARD_CHAT_KEY,
+  getChatClearedAt,
+} from '@/lib/chat-storage';
 import {
   getLiveKitRateLimitRemainingMs,
   getOrCreateGuestIdentity,
@@ -51,12 +56,35 @@ type CombinedMessage = {
   timestamp: number;
 };
 
-// localStorage-Key für Chat-Persistenz
-const CHAT_STORAGE_KEY = 'elite-dashboard-chat';
+const CHAT_STORAGE_KEY = ELITE_DASHBOARD_CHAT_KEY;
 
-export function ChatWidget() {
-  const { closeWidget, addLog } = useWidgetManager();
+function ChatWidgetShell({ children }: { children: ReactNode }) {
   const { layout, getShellClass } = useWidgetFullscreen('chat');
+  return (
+    <motion.div
+      layout={layout}
+      initial={{ opacity: 0, scale: 0.9 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.9 }}
+      className={getShellClass(`flex flex-col ${WIDGET_PANEL_CLASS} h-full min-h-[300px]`)}
+    >
+      {children}
+    </motion.div>
+  );
+}
+
+/** Nutzt die bestehende HUD-LiveKit-Sitzung — keine zweite Verbindung, kein doppeltes Audio. */
+function ChatWidgetEmbedded() {
+  const { closeWidget, addLog } = useWidgetManager();
+  return (
+    <ChatWidgetShell>
+      <LiveChatInterface addLog={addLog} closeWidget={closeWidget} embedded />
+    </ChatWidgetShell>
+  );
+}
+
+function ChatWidgetStandalone() {
+  const { closeWidget, addLog } = useWidgetManager();
   const [token, setToken] = useState<string | null>(null);
   const [serverUrl, setServerUrl] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -135,9 +163,7 @@ export function ChatWidget() {
   }, []);
 
   return (
-    <motion.div layout={layout} initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.9 }}
-      className={getShellClass(`flex flex-col ${WIDGET_PANEL_CLASS} h-full min-h-[300px]`)}>
-      
+    <ChatWidgetShell>
       {token && serverUrl ? (
         <LiveKitRoom
           audio={false}
@@ -172,11 +198,11 @@ export function ChatWidget() {
                 <span className={WIDGET_TITLE_CLASS}>Elite Assistant</span>
               </div>
             </div>
-            
+
             <div className="flex items-center gap-1.5">
               <WidgetFullscreenButton widgetId="chat" />
-              <button 
-                onClick={() => closeWidget('chat')} 
+              <button
+                onClick={() => closeWidget('chat')}
                 className="p-1.5 rounded-lg hover:bg-red-500/10 text-white/30 hover:text-red-400 transition-all"
               >
                 <X className="size-3.5" />
@@ -198,8 +224,10 @@ export function ChatWidget() {
                   </p>
                   {connectionError && <p className="text-[9px] text-red-400/40 max-w-[180px]">{connectionError}</p>}
                 </div>
-                <button onClick={connectToRoom}
-                  className="mt-2 px-6 py-2.5 rounded-xl bg-primary/10 text-primary text-[10px] font-black uppercase tracking-[0.2em] ring-1 ring-primary/30 hover:bg-primary/20 transition-all active:scale-95 shadow-[0_0_20px_rgba(34,211,238,0.1)]">
+                <button
+                  onClick={connectToRoom}
+                  className="mt-2 px-6 py-2.5 rounded-xl bg-primary/10 text-primary text-[10px] font-black uppercase tracking-[0.2em] ring-1 ring-primary/30 hover:bg-primary/20 transition-all active:scale-95 shadow-[0_0_20px_rgba(34,211,238,0.1)]"
+                >
                   System Starten
                 </button>
               </>
@@ -210,8 +238,16 @@ export function ChatWidget() {
           </div>
         </>
       )}
-    </motion.div>
+    </ChatWidgetShell>
   );
+}
+
+export function ChatWidget() {
+  const parentRoom = useMaybeRoomContext();
+  if (parentRoom) {
+    return <ChatWidgetEmbedded />;
+  }
+  return <ChatWidgetStandalone />;
 }
 
 /**
@@ -221,14 +257,19 @@ export function ChatWidget() {
 function LiveChatInterface({
   addLog,
   closeWidget,
+  embedded = false,
 }: {
   addLog: (entry: Omit<LogEntry, 'id' | 'timestamp'>) => void;
   closeWidget: (name: WidgetId) => void;
+  embedded?: boolean;
 }) {
   const { state } = useVoiceAssistant();
   const { chatMessages, send } = useChat();
   const transcriptions = useTranscriptions();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const liveKitChatBaselineRef = useRef(0);
+  const transcriptionBaselineRef = useRef(0);
+  const lastAppliedClearRef = useRef(0);
 
   useDataChannel((data_packet) => {
     try {
@@ -246,7 +287,7 @@ function LiveChatInterface({
     if (typeof window === 'undefined') return [];
     try {
       const stored = localStorage.getItem(CHAT_STORAGE_KEY);
-      const clearedAt = parseInt(localStorage.getItem('elite-chat-cleared-at') || '0');
+      const clearedAt = getChatClearedAt();
       const messages: CombinedMessage[] = stored ? JSON.parse(stored) : [];
       // Nur Nachrichten laden, die nach dem letzten Löschen kamen
       return messages.filter(m => m.timestamp > clearedAt);
@@ -255,12 +296,29 @@ function LiveChatInterface({
 
   const { clearChatHistory, chatLastClearedAt } = useWidgetManager();
 
-  // Chat-Verlauf sofort leeren, wenn globaler Zeitstempel sich ändert
+  const applyChatClear = useCallback(() => {
+    setSavedMessages((prev) => (prev.length === 0 ? prev : []));
+    liveKitChatBaselineRef.current = chatMessages.length;
+    transcriptionBaselineRef.current = transcriptions.length;
+  }, [chatMessages.length, transcriptions.length]);
+
+  // Nur bei neuem Lösch-Zeitstempel reagieren — nicht bei jedem Transkript-Update
   useEffect(() => {
-    if (chatLastClearedAt > 0) {
-      setSavedMessages([]);
-    }
-  }, [chatLastClearedAt]);
+    if (chatLastClearedAt <= 0 || chatLastClearedAt === lastAppliedClearRef.current) return;
+    lastAppliedClearRef.current = chatLastClearedAt;
+    applyChatClear();
+  }, [chatLastClearedAt, applyChatClear]);
+
+  useEffect(() => {
+    const onCleared = (e: Event) => {
+      const detail = (e as CustomEvent<{ clearedAt?: number }>).detail;
+      const ts = detail?.clearedAt ?? getChatClearedAt();
+      if (ts > 0) lastAppliedClearRef.current = ts;
+      applyChatClear();
+    };
+    window.addEventListener('chat-cleared', onCleared);
+    return () => window.removeEventListener('chat-cleared', onCleared);
+  }, [applyChatClear]);
 
   // Umlaut-Reparatur (bekanntes OpenAI Realtime Problem)
   const fixUmlauts = useCallback((text: string): string => {
@@ -288,6 +346,7 @@ function LiveChatInterface({
 
     // 2. Live Chat-Nachrichten
     chatMessages.forEach((msg, i) => {
+      if (i < liveKitChatBaselineRef.current) return;
       const rawTs = msg.timestamp ?? Date.now();
       const ts = typeof rawTs === 'number' ? rawTs : new Date(rawTs).getTime();
       
@@ -304,6 +363,7 @@ function LiveChatInterface({
 
     // 3. Transkriptionen
     transcriptions.forEach((segment, i) => {
+      if (i < transcriptionBaselineRef.current) return;
       if (!segment.text?.trim()) return;
       const identity = segment.participantInfo?.identity ?? 'unknown';
       const segMeta = segment as {
@@ -339,9 +399,14 @@ function LiveChatInterface({
 
   // Persistenz in localStorage
   useEffect(() => {
-    if (combinedMessages.length > 0) {
-      try { localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(combinedMessages.slice(-100))); }
-      catch { /* localStorage voll */ }
+    if (combinedMessages.length === 0) {
+      localStorage.removeItem(CHAT_STORAGE_KEY);
+      return;
+    }
+    try {
+      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(combinedMessages.slice(-100)));
+    } catch {
+      /* localStorage voll */
     }
   }, [combinedMessages]);
 
@@ -385,7 +450,9 @@ function LiveChatInterface({
           <span className={WIDGET_TITLE_CLASS}>KI Chat</span>
           <span className="flex items-center gap-1">
             <span className="size-1.5 rounded-full bg-green-400 animate-pulse" />
-            <span className="text-[9px] text-green-400 font-bold uppercase">Live</span>
+            <span className="text-[9px] text-green-400 font-bold uppercase">
+              {embedded ? 'HUD' : 'Live'}
+            </span>
           </span>
         </div>
         <motion.div className="flex items-center gap-1">

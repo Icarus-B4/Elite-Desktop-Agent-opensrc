@@ -1,6 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 
 function getAppDataBackendDir() {
   const base = process.env.LOCALAPPDATA || process.env.APPDATA;
@@ -88,10 +87,18 @@ function loadEliteEnvIntoObject(rootDir) {
 }
 
 function buildServiceEnv(rootDir, baseEnv = process.env) {
+  let appendLogLine;
+  try {
+    ({ appendLogLine, getServicesLogPath } = require('./log-path'));
+  } catch {
+    appendLogLine = null;
+  }
   ensureAppDataEnvFile(rootDir, (msg) => {
     try {
-      const logFile = path.join(os.homedir(), 'Desktop', 'EliteAgent_services.log');
-      fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`);
+      const line = `[${new Date().toISOString()}] ${msg}\n`;
+      if (appendLogLine && getServicesLogPath) {
+        appendLogLine(getServicesLogPath(), line);
+      }
     } catch {
       /* ignore */
     }

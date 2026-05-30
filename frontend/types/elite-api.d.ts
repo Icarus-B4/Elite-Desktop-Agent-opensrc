@@ -1,3 +1,17 @@
+export type RuntimeStatusPayload = {
+  backend: boolean;
+  hermes: boolean;
+  hermesDashboard: boolean;
+  missionControl: boolean;
+  frontend: boolean;
+  pulse: boolean;
+  repaired?: string[];
+  pulseManagerScript?: string;
+  paiHome?: string;
+  hermesGatewayUrl?: string;
+  hermesDashboardUrl?: string;
+};
+
 export {};
 
 declare global {
@@ -12,18 +26,9 @@ declare global {
       hideToTray?: () => void;
       showWindow?: () => void;
       quitApp?: () => void;
-      getRuntimeStatus?: () => Promise<{
-        backend: boolean;
-        hermes: boolean;
-        hermesDashboard: boolean;
-        missionControl: boolean;
-        frontend: boolean;
-        pulse: boolean;
-        pulseManagerScript: string;
-        paiHome: string;
-        hermesGatewayUrl?: string;
-        hermesDashboardUrl?: string;
-      }>;
+      getRuntimeStatus?: () => Promise<RuntimeStatusPayload>;
+      ensureRuntimeHealthy?: (opts?: { reason?: string; force?: boolean }) => Promise<RuntimeStatusPayload>;
+      onRuntimeRepaired?: (callback: (status: RuntimeStatusPayload) => void) => () => void;
       restartPaiPulse?: () => Promise<{ ok: boolean }>;
       openWidgetWindow?: (
         widgetId: string,

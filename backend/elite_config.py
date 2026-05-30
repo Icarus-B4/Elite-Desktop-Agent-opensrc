@@ -25,9 +25,10 @@ DEFAULT_CONFIG = {
     "ollamaBaseUrl": "http://127.0.0.1:11434/v1",
     "whisperModel": "medium",
     "offlineTtsEngine": "piper",
-    "piperVoice": "de_DE-thorsten-high",
+    "piperVoice": "de_DE-ramona-medium",
     "startupVoiceGreeting": True,
     "realtimeModel": "gpt-realtime-mini",
+    "voice": "coral",
 }
 
 

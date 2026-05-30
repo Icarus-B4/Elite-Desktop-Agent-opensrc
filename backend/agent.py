@@ -30,6 +30,7 @@ from hermes_config import get_hermes_gateway_log_path, get_hermes_home
 from tools import ALL_TOOLS
 from skills_manager import load_skills, load_allowlisted_claude_skills, format_skills_for_prompt
 from paths import get_writable_path, get_screenshots_dir, get_memory_file
+from shared_brain import load_shared_brain_context
 from elite_config import (
     cloud_api_key_present,
     load_config,
@@ -553,6 +554,8 @@ class WebstarkAgent(Agent):
             "13. SPRACHE & SONDERZEICHEN (ABSOLUTE PRIORITÄT): Immer wenn der Nutzer ein deutsches Wort ausspricht, das Umlaute (ä, ö, ü) oder das Eszett (ß) enthält, musst du diesen Laut ZWISCHEN DEN ANFÜHRUNGSZEICHEN IM TOOL AUFLÖSEN.\n"
             "14. SPRACHE DEUTSCH & HINTERGRUND-FILTER: Transkribiere und antworte NUR auf Deutsch. "
             "Ignoriere TV, YouTube, fremdsprachige Passagen (z.B. Chinesisch/Englisch aus Videos) und Gespräche im Raum. "
+            "AUSNAHME: 'Öffne <Sendername>' oder '<Sendername> in Zattoo' sind BEFEHLE — keine Hintergrundgeräusche! "
+            "Führe Sender-Öffnen-Befehle (ProSieben, MTV, Comedy Central, SRF etc.) IMMER mit open_app(name) oder open_website(url) aus. "
             "Reagiere NUR wenn der Chef dich klar mit 'Elite', 'Jarvis' oder einem eindeutigen Befehl anspricht – sonst absolut stumm.\n"
             "15. ANTI-ECHO / ANTI-LOOP: Kein Smalltalk, kein 'Hallo', kein 'bereit', kein Wiederholen von Regeln. "
             "Eine kurze Antwort nur nach klarem Chef-Befehl. TV-, Sport- oder fremdsprachiger Input = absolut stumm.\n"
@@ -583,6 +586,13 @@ class WebstarkAgent(Agent):
             "Web-Agent: run_web_agent für mehrstufige Browser-Aufgaben → browserAgent-Widget. Kasa: kasa_discover, kasa_control → kasa-Widget. "
             "Face Auth: enroll_face_reference wenn Nutzer Enrollment will; bei aktivierter Face Auth keine riskanten Tools ohne Auth. "
             "Widget-IDs: cad, printer, browserAgent, kasa, authLock.\n"
+            "24. GEDÄCHTNIS & PERSÖNLICHKEIT: Du hast ein GEMEINSAMES GEDÄCHTNIS mit Hermes (shared brain). "
+            "Dein Langzeitgedächtnis wird beim Start automatisch geladen — du weißt bereits, was du dir früher gemerkt hast. "
+            "PROAKTIVES MERKEN: Wenn der Nutzer persönliche Informationen teilt (Name, Beruf, Vorlieben, Hobbys, "
+            "bevorzugte Programme, Arbeitsgewohnheiten), speichere sie SOFORT mit 'update_agent_memory' unter category='preferences'. "
+            "Wenn der Nutzer fragt 'Was weißt du über mich?', antworte direkt aus deinem geladenen Gedächtnis — "
+            "du musst NICHT erst 'read_agent_memory' aufrufen, da die Daten bereits im Kontext sind. "
+            "Nur 'read_agent_memory' nutzen, wenn der Nutzer explizit den kompletten Speicher sehen will.\n"
         )
         extra_instructions = (
             "Du schweigst, wenn du nicht angesprochen wirst. Du lachst nicht, du nickst nicht, du atmest nicht. "
@@ -645,6 +655,14 @@ class WebstarkAgent(Agent):
                 )
             
         instructions += extra_instructions
+
+        # Gemeinsames Gehirn (Elite + Hermes Memory) in den Prompt laden
+        try:
+            brain_context = load_shared_brain_context()
+            if brain_context:
+                instructions += brain_context
+        except Exception as brain_err:
+            logger.warning("Shared Brain konnte nicht geladen werden: %s", brain_err)
 
         if llm_mode == "local":
             instructions += (
@@ -726,7 +744,7 @@ class WebstarkAgent(Agent):
                 instructions=instructions,
                 llm=openai.realtime.RealtimeModel(
                     model=config.get("realtimeModel", "gpt-realtime-mini"),
-                    voice=config.get("voice", "echo"),
+                    voice=config.get("voice", "coral"),
                     modalities=["audio", "text"],
                     input_audio_transcription={
                         "model": "gpt-4o-mini-transcribe",
@@ -738,6 +756,19 @@ class WebstarkAgent(Agent):
                 ),
                 tools=ALL_TOOLS,
             )
+
+def clean_text_for_speech(text: str) -> str:
+    import re
+    # Code-Blöcke komplett entfernen
+    text = re.sub(r'```[\s\S]*?```', '', text)
+    # Inline-Code-Backticks entfernen
+    text = text.replace('`', '')
+    # Markdown-Sterne und Unterstriche entfernen
+    text = text.replace('*', '').replace('_', '')
+    # Eventuelle leere Zeilen bereinigen
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
 
 async def entrypoint(ctx: JobContext):
     logger.info(f"--- Neue Session gestartet (Room: {ctx.room.name}) ---")
@@ -882,7 +913,21 @@ async def entrypoint(ctx: JobContext):
 
             async def session_end_sync() -> None:
                 try:
-                    await PAI_ORCHESTRATOR.session_end_sync(get_memory_file())
+                    # Timeout verhindert ewiges Blockieren bei Executor-Shutdown
+                    await asyncio.wait_for(
+                        PAI_ORCHESTRATOR.session_end_sync(get_memory_file()),
+                        timeout=10.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Session-End PAI sync Timeout (10s) — Executor vermutlich bereits heruntergefahren"
+                    )
+                except RuntimeError as e:
+                    # 'Executor shutdown' ist erwartbar bei Session-Ende — kein Alarm nötig
+                    if "shutdown" in str(e).lower() or "cannot schedule" in str(e).lower():
+                        logger.warning("Session-End PAI sync übersprungen (Executor beendet): %s", e)
+                    else:
+                        logger.error("Session-End PAI orchestrator sync failed: %s", e)
                 except Exception as e:
                     logger.error("Session-End PAI orchestrator sync failed: %s", e)
 
@@ -1534,6 +1579,19 @@ async def entrypoint(ctx: JobContext):
                 payload = data_packet.data.decode("utf-8")
                 data = json.loads(payload)
                 
+                if data.get("type") == "hermes_speak":
+                    text = data.get("text", "")
+                    if text:
+                        clean_text = clean_text_for_speech(text)
+                        if clean_text:
+                            async def speak_text():
+                                try:
+                                    await session.say(clean_text, allow_interruptions=True)
+                                except Exception as err:
+                                    logger.error("Hermes speak say failed: %s", err)
+                            asyncio.create_task(speak_text())
+                    return
+
                 if data.get("type") in ("request_startup_greeting", "startup_greeting_ready"):
                     sender = data.get("participant_id")
                     if not sender and data_packet.participant:

@@ -466,7 +466,7 @@ def _fuzzy_find_file(error_message: str) -> str | None:
     
     # --- Phase 2: Schlüsselwort → Datei Mapping ---
     keyword_file_map = {
-        "loop":            ["lib/loops-api.ts", "Observability/src/components/activity/LoopsDashboard.tsx"],
+        "loops-api":       ["lib/loops-api.ts", "Observability/src/components/activity/LoopsDashboard.tsx"],
         "novelty":         ["lib/novelty-state.ts", "Observability/src/app/novelty/page.tsx"],
         "self_heal":       ["backend/self_healing.py"],
         "self_learn":      ["backend/self_learning.py"],
@@ -514,9 +514,14 @@ def extract_file_from_traceback(error_message: str) -> str | None:
     """
     # 1. Python-Traceback-Muster: File "C:\path\to\file.py", line 123
     pattern = r'File "([^"]+\.py)"'
-    match = re.search(pattern, error_message)
-    if match:
-        return match.group(1)
+    matches = re.findall(pattern, error_message)
+    if matches:
+        for candidate in reversed(matches):
+            cand_lower = candidate.lower()
+            if any(x in cand_lower for x in ["site-packages", "appdata\\roaming\\python", "python31", "lib\\"]):
+                logger.info(f"Traceback-Parser: Ignoriere System-Pfad {candidate}")
+                continue
+            return candidate
     
     # 2. Intelligente Fuzzy-Suche über Schlüsselwörter und Dateinamen
     fuzzy_result = _fuzzy_find_file(error_message)
@@ -531,9 +536,98 @@ def extract_file_from_traceback(error_message: str) -> str | None:
         return "backend/tools.py"
     return None
 
+async def _heal_port_conflict(context: Any, error_message: str) -> bool:
+    """Prüft auf Port-Blockierungen und versucht, den blockierenden Prozess automatisch zu beenden."""
+    msg_lower = error_message.lower()
+    is_port_err = any(x in msg_lower for x in ["10048", "bind on address", "address already in use", "socketadresse"])
+    if not is_port_err:
+        return False
+
+    # Versuche Portnummer zu finden
+    port = None
+    port_match = re.search(r'\b(7861|7880|8642|9119|11434|3000|31337)\b', error_message)
+    if port_match:
+        try:
+            port = int(port_match.group(0))
+        except ValueError:
+            pass
+
+    if not port:
+        if "livekit" in msg_lower or "worker" in msg_lower:
+            port = 7861
+        else:
+            return False
+
+    await emit_healing_log(context, "warning", f"🔧 PORT-HEILUNG: Konflikt auf Port {port} erkannt. Versuche blockierenden Prozess zu finden...")
+    
+    try:
+        # PowerShell Befehl um OwningProcess (PID) zu ermitteln
+        cmd = f"Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -First 1"
+        proc = await asyncio.create_subprocess_exec(
+            "powershell.exe", "-Command", cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await proc.communicate()
+        pid_str = stdout.decode("utf-8", errors="ignore").strip()
+        
+        if pid_str and pid_str.isdigit():
+            pid = int(pid_str)
+            await emit_healing_log(context, "warning", f"🔧 PORT-HEILUNG: Prozess mit PID {pid} blockiert Port {port}. Beende Prozess...")
+            
+            # Prozess killen
+            kill_cmd = f"Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue"
+            kill_proc = await asyncio.create_subprocess_exec(
+                "powershell.exe", "-Command", kill_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await kill_proc.communicate()
+            
+            await emit_healing_log(context, "result", f"✅ PORT-HEILUNG: Prozess {pid} erfolgreich beendet. Port {port} ist wieder frei!")
+            return True
+        else:
+            await emit_healing_log(context, "error", f"🔧 PORT-HEILUNG: Kein aktiver Prozess auf Port {port} gefunden.")
+    except Exception as e:
+        logger.warning("Port-Selbstheilung fehlgeschlagen: %s", e)
+        
+    return False
+
+
+def _is_transient_or_lifecycle_error(error_message: str) -> bool:
+    """Prüft, ob der Fehler ein normaler Shutdown- oder Socket-Laufzeitfehler ist, der keinen Code-Patch benötigt."""
+    msg_lower = error_message.lower()
+    transient_patterns = [
+        "event loop is closed",
+        "duplexclosed",
+        "incompletereaderror",
+        "connectionreseterror",
+        "connectionabortederror",
+        "brokenpipeerror",
+        "winerror 64",
+        "netzwerkname ist nicht mehr verfügbar",
+        "executor shutdown has been called",
+        "generator ignored generatorexit",
+        "task was destroyed but it is pending"
+    ]
+    return any(p in msg_lower for p in transient_patterns)
+
+
 async def run_self_healing(context: Any, error_message: str, target_file: str = "") -> str:
     """Führt den kollaborativen Multi-Agenten-Fehlerbehebungs-Workflow aus."""
     await emit_healing_log(context, "thinking", "👁️ OBSERVE: Starte selbstheilenden Workflow...")
+    
+    # 0. Transiente Fehler oder Lifecycle-Meldungen abfangen
+    if _is_transient_or_lifecycle_error(error_message):
+        await emit_healing_log(context, "result", "Selbstheilung übersprungen: Dies ist eine normale Netzwerk-, Socket- oder Shutdown-Meldung. Keine Code-Reparatur erforderlich.")
+        return "Selbstheilung übersprungen: Keine Code-Reparatur für transiente System- und Netzwerk-Events nötig."
+    
+    # Port-Konflikt-Heiler ausführen
+    try:
+        if await _heal_port_conflict(context, error_message):
+            return "Selbstheilung erfolgreich: Port-Konflikt wurde automatisch behoben. Der blockierende Prozess wurde beendet."
+    except Exception as port_err:
+        logger.warning("Port-Heiler Exception: %s", port_err)
     
     # 1. Zieldatei ermitteln
     if not target_file:

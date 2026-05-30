@@ -207,7 +207,16 @@ class WindowsPyttsx3TTS(tts.TTS):
 
 
 def build_local_tts(config: dict) -> tuple[tts.TTS, str]:
-    """Piper (Standard) oder pyttsx3-Fallback."""
+    """OpenAI Cloud-TTS, Piper oder pyttsx3-Fallback."""
+    tts_provider = str(config.get("ttsProvider", "")).lower().strip()
+
+    if tts_provider == "openai":
+        voice = str(config.get("ttsVoice", "onyx")).strip()
+        model = str(config.get("ttsModel", "gpt-4o-mini-tts")).strip()
+        logger.info("Cloud-TTS: OpenAI %s (voice=%s)", model, voice)
+        openai_tts = openai.TTS(voice=voice, model=model)
+        return openai_tts, f"openai:{voice}"
+
     engine = str(config.get("offlineTtsEngine", "piper")).lower().strip()
     if engine == "pyttsx3":
         logger.info("Offline-TTS: Windows SAPI (pyttsx3)")

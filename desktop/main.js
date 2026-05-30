@@ -25,7 +25,13 @@ function patchConsoleForHeadless() {
 }
 patchConsoleForHeadless();
 
-const { startServices, stopServices, restartPaiPulse, getRuntimeStatus } = require('./services');
+const {
+  startServices,
+  stopServices,
+  restartPaiPulse,
+  getRuntimeStatus,
+  ensureRuntimeHealthy,
+} = require('./services');
 const { setupTerminalToggle } = require('./log-window');
 const { setupWidgetWindowIpc, setMainWindow } = require('./widget-window');
 const { setupMissionControlWindowIpc } = require('./mission-control-window');
@@ -330,6 +336,16 @@ app.whenReady().then(async () => {
   // Terminal-Toggle aktivieren (Strg+T)
   setupTerminalToggle();
 
+  // Hintergrund-Health-Check wenn HUD in der Systemleiste versteckt ist
+  setInterval(() => {
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isVisible()) return;
+    void ensureRuntimeHealthy({ reason: 'background-poll' }).then((status) => {
+      if (status?.repaired?.length) {
+        mainWindow?.webContents?.send('elite-runtime-repaired', status);
+      }
+    });
+  }, 10 * 60 * 1000);
+
   app.on('activate', () => {
 
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -351,6 +367,17 @@ ipcMain.on('restart-services', async () => {
   console.log('[IPC] Restarting services...');
   await stopServices();
   await startServices();
+  const status = await getRuntimeStatus();
+  mainWindow?.webContents?.send('elite-runtime-repaired', status);
+});
+
+ipcMain.handle('elite-ensure-runtime-healthy', async (_event, opts) => {
+  const status = await ensureRuntimeHealthy({
+    reason: opts?.reason || 'ipc',
+    force: Boolean(opts?.force),
+  });
+  mainWindow?.webContents?.send('elite-runtime-repaired', status);
+  return status;
 });
 
 ipcMain.on('reload-hud', async (event) => {

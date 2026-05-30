@@ -37,7 +37,7 @@ export function useAudioAnalyzer(track: any) {
         sourceRef.current = null;
       }
       analyzerRef.current = null;
-      setLevels(new Array(8).fill(0));
+      setLevels((prev) => (prev.every((v) => v === 0) ? prev : new Array(8).fill(0)));
       return;
     }
 
@@ -62,7 +62,7 @@ export function useAudioAnalyzer(track: any) {
         sourceRef.current = null;
       }
       analyzerRef.current = null;
-      setLevels(new Array(8).fill(0));
+      setLevels((prev) => (prev.every((v) => v === 0) ? prev : new Array(8).fill(0)));
       return;
     }
 

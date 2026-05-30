@@ -71,12 +71,14 @@ export function MissionControlWidget() {
     return () => clearInterval(interval);
   }, [fetchData]);
 
+  const lastHermesLogLineRef = useRef('');
   useEffect(() => {
     const logs = data?.recentLogs ?? [];
-    if (logs.length > lastLogCountRef.current && logs.length > 0) {
-      const newest = logs[logs.length - 1];
-      addLog({ type: 'system', message: `[Hermes] ${newest.slice(0, 200)}` });
-    }
+    if (logs.length === 0) return;
+    const newest = logs[logs.length - 1];
+    if (!newest || newest === lastHermesLogLineRef.current) return;
+    lastHermesLogLineRef.current = newest;
+    addLog({ type: 'system', message: `[Hermes] ${newest.slice(0, 200)}` });
     lastLogCountRef.current = logs.length;
   }, [data?.recentLogs, addLog]);
 

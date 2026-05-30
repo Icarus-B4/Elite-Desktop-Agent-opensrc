@@ -37,10 +37,19 @@ function setupTray({ getWindow, onQuitRequested }) {
         },
         { type: 'separator' },
         {
-          label: 'System Logs (Terminal)',
+          label: 'Logdatei anzeigen',
           click: () => {
             const { toggleLogWindow } = require('./log-window');
             toggleLogWindow();
+          },
+        },
+        {
+          label: 'Dienste neu starten',
+          click: () => {
+            const { ensureRuntimeHealthy } = require('./services');
+            void ensureRuntimeHealthy({ reason: 'tray-menu', force: true }).then(
+              notifyRuntimeRepaired,
+            );
           },
         },
         {
@@ -76,12 +85,29 @@ function hideToTray() {
   win.hide();
 }
 
+function notifyRuntimeRepaired(status) {
+  const win = getMainWindow();
+  if (!win || win.isDestroyed()) return;
+  try {
+    win.webContents.send('elite-runtime-repaired', status);
+  } catch {
+    /* Fenster gerade geschlossen */
+  }
+}
+
 function showFromTray() {
   const win = getMainWindow();
   if (!win) return;
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
+
+  try {
+    const { ensureRuntimeHealthy } = require('./services');
+    void ensureRuntimeHealthy({ reason: 'tray-show' }).then(notifyRuntimeRepaired);
+  } catch (err) {
+    console.warn('[Tray] ensureRuntimeHealthy:', err.message);
+  }
 }
 
 function destroyTray() {

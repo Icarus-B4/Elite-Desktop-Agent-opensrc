@@ -33,8 +33,9 @@ const execAsync = promisify(exec);
 const {
   getServicesLogPath,
   getEliteOnlyLogPath,
+  getMaxLogBytes,
   appendLogLine,
-  rotateIfHuge,
+  trimAllEliteLogs,
 } = require('./log-path');
 
 let ensureDockerReady = async () => true;
@@ -49,8 +50,11 @@ let logFile;
 let eliteLogFile;
 let processes = [];
 let isShuttingDown = false;
-const WATCHED_SERVICES = new Set(['Jarvis Core', 'Frontend', 'PTY Server']);
+const WATCHED_SERVICES = new Set(['Jarvis Core', 'Frontend', 'PTY Server', 'Hermes Stack']);
 const restartAttempts = new Map();
+let lastServiceCommands = [];
+let lastSpawnContext = null;
+let repairInFlight = false;
 const MAX_RESTARTS = 3;
 const RESTART_DELAYS_MS = [5000, 15000, 30000];
 let readiness = {
@@ -70,20 +74,41 @@ function initPaths() {
   ROOT = path.resolve(__dirname, '..');
   logFile = getServicesLogPath();
   eliteLogFile = getEliteOnlyLogPath();
-  rotateIfHuge(logFile);
-  rotateIfHuge(eliteLogFile);
+  trimAllEliteLogs();
 }
 
 function shouldLogJarvisCoreLine(text) {
   const t = text.trim();
   if (!t) return false;
-  if (/error|failed|FATAL|ECONNREFUSED|Exception|Traceback|WARN(?!ING)/i.test(t)) return true;
-  if (/Compil|Ready|started|listening|agent\.py|LiveKit|Backend/i.test(t)) return true;
-  if (/^\s*(GET|POST|PUT|DELETE) \/api\/(elite\/settings|system-status|hermes\/overview)/i.test(t)) {
-    return false;
+  if (/error|failed|FATAL|ECONNREFUSED|Exception|Traceback/i.test(t)) return true;
+  if (/WARN|WARNING/i.test(t)) return true;
+  if (/Compil|Ready|started|listening|agent\.py|LiveKit|Backend|worker.*registered/i.test(t)) {
+    return true;
   }
-  if (/^\s*(GET|POST) \/api\//i.test(t)) return false;
-  return true;
+  if (/^\s*(GET|POST|PUT|DELETE)\s/i.test(t)) return false;
+  if (/health|heartbeat|polling|\/api\//i.test(t)) return false;
+  return false;
+}
+
+function shouldLogFrontendLine(text) {
+  const t = text.trim();
+  if (!t) return false;
+  if (/error|failed|FATAL|ECONNREFUSED|⨯|Critical/i.test(t)) return true;
+  if (/compiled|ready in|started server/i.test(t)) return true;
+  if (/^\s*(GET|POST|PUT|DELETE)\s/i.test(t)) return false;
+  if (/hmr|webpack|Fast Refresh/i.test(t)) return false;
+  return false;
+}
+
+function shouldLogServiceLine(serviceName, text) {
+  if (serviceName === 'Jarvis Core') return shouldLogJarvisCoreLine(text);
+  if (serviceName === 'Frontend') return shouldLogFrontendLine(text);
+  if (serviceName.endsWith('-Error')) return true;
+  if (/error|failed|FATAL|Exception|Traceback|KRITISCH/i.test(text)) return true;
+  if (serviceName === 'PTY Server' || serviceName === 'Hermes Stack' || serviceName === 'PAI Pulse') {
+    return /error|warn|started|ready|listening|failed/i.test(text);
+  }
+  return false;
 }
 
 function log(msg, { eliteOnly = false } = {}) {
@@ -106,7 +131,7 @@ function logProcessOutput(serviceName, text) {
   if (!chunk) return;
   for (const part of chunk.split(/\r?\n/)) {
     if (!part.trim()) continue;
-    if (serviceName === 'Jarvis Core' && !shouldLogJarvisCoreLine(part)) continue;
+    if (!shouldLogServiceLine(serviceName, part)) continue;
     log(`[${serviceName}] ${part}`);
   }
 }
@@ -146,7 +171,8 @@ async function checkPulseReady() {
 
 async function checkHermesGatewayReady() {
   const base = getHermesGatewayUrl();
-  return checkHttpReady(`${base}/v1/models`, 2000);
+  // /v1/health braucht keinen API-Key (Gateway akzeptiert Health-Checks ohne Auth)
+  return checkHttpReady(`${base}/v1/health`, 2000);
 }
 
 async function checkHermesDashboardReady() {
@@ -340,8 +366,9 @@ async function startServices() {
     initPaths();
     log('====================================================', { eliteOnly: true });
     log(`[Services] START - Root: ${ROOT}`, { eliteOnly: true });
-    log(`[Services] Log-Dateien: ${logFile}`, { eliteOnly: true });
-    log(`[Services] Elite-Log (ohne HTTP-Spam): ${eliteLogFile}`, { eliteOnly: true });
+    const maxKb = Math.round(getMaxLogBytes() / 1024);
+    log(`[Services] Log-Dateien (max. ${maxKb} KB je): ${logFile}`, { eliteOnly: true });
+    log(`[Services] Elite-Log: ${eliteLogFile}`, { eliteOnly: true });
 
     if (process.platform === 'win32') {
       log('[Services] Docker/LiveKit Bootstrap (nur bei livekitMode=local)…');
@@ -455,6 +482,8 @@ async function startServices() {
     };
 
     restartAttempts.clear();
+    lastServiceCommands = serviceCommands;
+    lastSpawnContext = spawnContext;
     serviceCommands.forEach((service) => {
       spawnManagedService(service, spawnContext);
     });
@@ -553,9 +582,86 @@ async function getRuntimeStatus() {
   };
 }
 
+function findServiceDefinition(name) {
+  return lastServiceCommands.find((s) => s.name === name);
+}
+
+function repairSpawnService(name, repairs) {
+  if (isShuttingDown || !lastSpawnContext) return;
+  const service = findServiceDefinition(name);
+  if (!service) return;
+  restartAttempts.delete(name);
+  spawnManagedService(service, lastSpawnContext);
+  repairs.push(name);
+}
+
+/**
+ * Prüft HTTP-Readiness und startet fehlende Kern-Dienste neu (Tray-Wake / Hintergrund-Poll).
+ */
+async function ensureRuntimeHealthy({ reason = 'unknown', force = false } = {}) {
+  if (isShuttingDown) return { ...readiness, repaired: [] };
+  if (repairInFlight && !force) return { ...readiness, repaired: [] };
+
+  initPaths();
+  if (!lastServiceCommands.length || !lastSpawnContext) {
+    log(`[Services] ensureRuntimeHealthy(${reason}): keine aktive Service-Liste.`, {
+      eliteOnly: true,
+    });
+    return { ...readiness, repaired: [] };
+  }
+
+  repairInFlight = true;
+  try {
+    if (force) restartAttempts.clear();
+
+    await setReadinessSnapshot();
+    const repairs = [];
+
+    if (!readiness.frontend) {
+      repairSpawnService('Frontend', repairs);
+    }
+
+    if (!readiness.backend) {
+      if (findServiceDefinition('Jarvis Core')) {
+        repairSpawnService('Jarvis Core', repairs);
+      } else if (findServiceDefinition('Backend Agent')) {
+        repairSpawnService('Backend Agent', repairs);
+      }
+    }
+
+    if (!readiness.hermes) {
+      repairSpawnService('Hermes Stack', repairs);
+    }
+
+    if (!readiness.pulse) {
+      restartAttempts.delete('PAI Pulse');
+      const pulseOk = await restartPaiPulse();
+      if (pulseOk) {
+        repairs.push('PAI Pulse');
+      } else {
+        repairSpawnService('PAI Pulse', repairs);
+      }
+    }
+
+    if (repairs.length) {
+      await new Promise((r) => setTimeout(r, 4000));
+      await setReadinessSnapshot();
+      log(
+        `[Services] ensureRuntimeHealthy(${reason}): repariert=[${repairs.join(', ')}] readiness=${JSON.stringify(readiness)}`,
+        { eliteOnly: true },
+      );
+    }
+
+    return { ...readiness, repaired: repairs };
+  } finally {
+    repairInFlight = false;
+  }
+}
+
 module.exports = {
   startServices,
   stopServices,
   restartPaiPulse,
   getRuntimeStatus,
+  ensureRuntimeHealthy,
 };

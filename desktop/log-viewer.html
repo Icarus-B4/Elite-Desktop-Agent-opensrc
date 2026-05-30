@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="de" data-hud-theme="0">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self'; script-src 'self'"
+    />
+    <title>Elite — System-Logs</title>
+    <link rel="stylesheet" href="log-viewer.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="header">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true"></div>
+          <div>
+            <h1>Elite</h1>
+            <span>System-Logs</span>
+          </div>
+        </div>
+      </header>
+
+      <div class="toolbar">
+        <nav class="tabs" id="tabs" role="tablist" aria-label="Logdateien"></nav>
+        <div class="actions">
+          <button type="button" class="btn" id="btnRefresh" title="Logs neu laden">Aktualisieren</button>
+          <button type="button" class="btn" id="btnCopy" title="Gesamten Inhalt kopieren">Kopieren</button>
+          <button type="button" class="btn" id="btnBottom" title="Zum Ende scrollen">Ende</button>
+        </div>
+      </div>
+
+      <p class="hint-bar" id="hint"></p>
+
+      <div class="log-wrap">
+        <div class="log-panel">
+          <textarea id="logText" readonly spellcheck="false" aria-label="Loginhalt"></textarea>
+        </div>
+      </div>
+
+      <footer class="statusbar">
+        <span class="live"><span class="live-dot" aria-hidden="true"></span> Live</span>
+        <span class="path" id="statusPath">Bereit</span>
+        <span class="size" id="statusSize"></span>
+      </footer>
+    </div>
+    <script src="log-viewer.js"></script>
+  </body>
+</html>

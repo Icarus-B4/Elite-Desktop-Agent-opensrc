@@ -10,6 +10,7 @@ import {
   sendHermesChat,
   type HermesHudMessage,
 } from '@/lib/hermes-chat-client';
+import { dispatchChatCleared, getChatClearedAt } from '@/lib/chat-storage';
 import { HUD_CHAT_AGENT_BUBBLE, HUD_CHAT_USER_BUBBLE } from './widget-shell';
 
 type Props = {
@@ -19,6 +20,7 @@ type Props = {
 
 function loadStoredMessages(): HermesHudMessage[] {
   if (typeof window === 'undefined') return [];
+  if (getChatClearedAt() > 0 && !localStorage.getItem(HERMES_CHAT_STORAGE_KEY)) return [];
   try {
     const raw = localStorage.getItem(HERMES_CHAT_STORAGE_KEY);
     if (!raw) return [];
@@ -39,10 +41,21 @@ export function HermesChatPanel({ gatewayReady, onLog }: Props) {
   useEffect(() => {
     setMessages(loadStoredMessages());
     setSessionId(localStorage.getItem(HERMES_SESSION_STORAGE_KEY));
+    const onCleared = () => {
+      setMessages([]);
+      setSessionId(null);
+      setSending(false);
+      setError(null);
+    };
+    window.addEventListener('chat-cleared', onCleared);
+    return () => window.removeEventListener('chat-cleared', onCleared);
   }, []);
 
   useEffect(() => {
-    if (messages.length === 0) return;
+    if (messages.length === 0) {
+      localStorage.removeItem(HERMES_CHAT_STORAGE_KEY);
+      return;
+    }
     localStorage.setItem(HERMES_CHAT_STORAGE_KEY, JSON.stringify(messages.slice(-80)));
   }, [messages]);
 
@@ -100,11 +113,27 @@ export function HermesChatPanel({ gatewayReady, onLog }: Props) {
         setMessages((prev) =>
           prev.map((m) =>
             m.id === assistantId
-              ? { ...m, content: content || '(leere Antwort)', pending: false }
+              ? {
+                  ...m,
+                  content:
+                    content ||
+                    '(Keine Textantwort — Gateway offline, Timeout oder leerer Stream.)',
+                  pending: false,
+                }
               : m,
           ),
         );
         onLog?.(`[Hermes] Antwort (${content.length} Zeichen)`);
+
+        const api = (window as any).elite;
+        if (api?.sendDataChannel && content) {
+          api.sendDataChannel(
+            JSON.stringify({
+              type: 'hermes_speak',
+              text: content,
+            })
+          );
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         setError(msg);
@@ -118,10 +147,10 @@ export function HermesChatPanel({ gatewayReady, onLog }: Props) {
   );
 
   const clearChat = () => {
+    dispatchChatCleared();
     setMessages([]);
     setSessionId(null);
-    localStorage.removeItem(HERMES_CHAT_STORAGE_KEY);
-    localStorage.removeItem(HERMES_SESSION_STORAGE_KEY);
+    setSending(false);
     setError(null);
   };
 

@@ -1,62 +1,48 @@
 const { BrowserWindow, globalShortcut, ipcMain } = require('electron');
-const path = require('path');
 const fs = require('fs');
-const os = require('os');
+const path = require('path');
+const { getTrayLogSections } = require('./log-path');
 
 let logWindow = null;
-const logPath = path.join(os.homedir(), 'Desktop', 'EliteAgent_services.log');
 
-// API für das Fenster bereitstellen
-ipcMain.handle('read-log', async () => {
-  if (fs.existsSync(logPath)) {
-    return fs.readFileSync(logPath, 'utf8');
+function readHudThemeId() {
+  try {
+    const configPath = path.join(__dirname, '..', 'backend', 'config.json');
+    const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const id = Number(data.hudAesthetics);
+    return id === 1 || id === 2 ? id : 0;
+  } catch {
+    return 0;
   }
-  return 'Warte auf Log-Daten...';
-});
+}
+
+ipcMain.handle('read-log-sections', async () => ({
+  sections: getTrayLogSections(),
+  hudTheme: readHudThemeId(),
+}));
 
 function createLogWindow() {
+  const preloadPath = path.join(__dirname, 'log-preload.js');
+  const htmlPath = path.join(__dirname, 'log-viewer.html');
+
   logWindow = new BrowserWindow({
     width: 900,
-    height: 500,
-    title: 'Elite System Terminal',
-    backgroundColor: '#0a0a0a',
+    height: 640,
+    minWidth: 520,
+    minHeight: 360,
+    title: 'Elite — System-Logs',
+    backgroundColor: '#000b1a',
     show: false,
+    autoHideMenuBar: true,
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false
-    }
+      preload: preloadPath,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
   });
 
-  const htmlContent = `
-    <html>
-      <head>
-        <style>
-          body { background: #0a0a0a; color: #00f2ff; font-family: 'Consolas', monospace; padding: 20px; overflow-y: scroll; font-size: 13px; line-height: 1.5; }
-          #output { white-space: pre-wrap; }
-          h2 { color: #00ffaa; border-bottom: 1px solid #00f2ff; padding-bottom: 5px; font-size: 16px; margin-top: 0; }
-        </style>
-      </head>
-      <body>
-        <h2>> ELITE_SYSTEM_CORE_LOG</h2>
-        <div id="output">Initialisiere Stream...</div>
-        <script>
-          const { ipcRenderer } = require('electron');
-          const output = document.getElementById('output');
-          async function updateLog() {
-            const text = await ipcRenderer.invoke('read-log');
-            if (output.innerText !== text) {
-              output.innerText = text;
-              window.scrollTo(0, document.body.scrollHeight);
-            }
-          }
-          setInterval(updateLog, 1000);
-          updateLog();
-        </script>
-      </body>
-    </html>
-  `;
-
-  logWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(htmlContent)}`);
+  logWindow.loadFile(htmlPath);
   logWindow.setMenuBarVisibility(false);
 
   logWindow.on('closed', () => {
@@ -64,23 +50,33 @@ function createLogWindow() {
   });
 }
 
-function toggleLogWindow() {
+function showLogWindow() {
   if (!logWindow) {
     createLogWindow();
-    logWindow.show();
+  } else if (!logWindow.webContents.isLoading()) {
+    logWindow.webContents.reloadIgnoringCache();
+  }
+  logWindow.show();
+  logWindow.focus();
+}
+
+function toggleLogWindow() {
+  if (!logWindow) {
+    showLogWindow();
+  } else if (logWindow.isVisible()) {
+    logWindow.hide();
   } else {
-    if (logWindow.isVisible()) {
-      logWindow.hide();
-    } else {
-      logWindow.show();
-    }
+    showLogWindow();
   }
 }
 
 function setupTerminalToggle() {
-  // Verhindere doppelte Registrierung
-  try { globalShortcut.unregister('CommandOrControl+T'); } catch(e) {}
-  
+  try {
+    globalShortcut.unregister('CommandOrControl+T');
+  } catch {
+    /* ignore */
+  }
+
   globalShortcut.register('CommandOrControl+T', () => {
     toggleLogWindow();
   });

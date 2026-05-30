@@ -4,6 +4,7 @@ import { createContext, useContext, useState, useCallback, useEffect, useRef, Re
 import { ToastProvider } from './toast-provider';
 import { broadcastWidgetSync, subscribeWidgetSync, POPOUTABLE_WIDGETS } from '@/lib/widget-sync';
 import { playSystemSound } from '@/lib/audio-effects';
+import { dispatchChatCleared } from '@/lib/chat-storage';
 
 /**
  * Widget-Manager: Zentrale Steuerung aller Dashboard-Widgets.
@@ -171,7 +172,11 @@ export function WidgetManagerProvider({ children }: { children: ReactNode }) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [capturedImages, setCapturedImages] = useState<CapturedImage[]>([]);
   const [musicLibrary, setMusicLibrary] = useState<string[]>([]);
-  const [chatLastClearedAt, setChatLastClearedAt] = useState<number>(0);
+  const [chatLastClearedAt, setChatLastClearedAt] = useState<number>(() => {
+    if (typeof window === 'undefined') return 0;
+    const val = Number.parseInt(localStorage.getItem('elite-chat-cleared-at') || '0', 10);
+    return Number.isFinite(val) ? val : 0;
+  });
   const [editorText, setEditorText] = useState<string>('');
   const [detachedWidgets, setDetachedWidgets] = useState<Record<WidgetId, boolean>>(DEFAULT_WIDGETS);
   const detachedRef = useRef(detachedWidgets);
@@ -542,14 +547,11 @@ export function WidgetManagerProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  // Chat-Verlauf löschen (BEIDE Keys: Hauptseite + Dashboard)
+  // Chat-Verlauf löschen (alle Persistenz-Keys inkl. Hermes)
   const clearChatHistory = useCallback(() => {
-    localStorage.removeItem('elite-dashboard-chat');
-    localStorage.removeItem('elite-chat-history');
-    setChatLastClearedAt(Date.now());
+    const now = dispatchChatCleared();
+    setChatLastClearedAt(now);
     addLogInternal({ type: 'system', message: 'Chat-Verlauf gelöscht' });
-    // Event auslösen, damit alle Chat-Komponenten reagieren
-    window.dispatchEvent(new Event('chat-cleared'));
   }, []);
 
   const setEditorTextSynced = useCallback((text: string) => {

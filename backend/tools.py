@@ -174,19 +174,81 @@ def _open_url_in_browser(url: str) -> str:
 
 def _known_media_web_target(app_name: str) -> tuple[str, str] | None:
     """Korrigiert häufige STT-Verhörer bei Medien-/Sender-Kommandos."""
-    normalized = re.sub(r"[,!.?;:]+", " ", (app_name or "").strip().lower())
+    normalized = re.sub(r"[,!.?;:]", " ", (app_name or "").strip().lower())
     normalized = re.sub(r"\s+", " ", normalized).strip()
     if not normalized:
         return None
 
-    has_prosieben = any(
-        phrase in normalized
-        for phrase in ("pro sieben", "prosieben", "pro7", "pro 7")
-    )
-    if has_prosieben and ("saturn" in normalized or "zattoo" in normalized):
-        return ("Zattoo ProSieben", "https://zattoo.com")
+    # STT-Korrekturen für häufige Verhörer
+    stt_fixes = {
+        "saturn": "zattoo",
+        "zat tu": "zattoo",
+        "satoo": "zattoo",
+        "zato": "zattoo",
+        "zatu": "zattoo",
+        "zat 2": "zattoo",
+        "emtv": "mtv",
+        "empty": "mtv",
+        "em tv": "mtv",
+        "comedy zentral": "comedy central",
+        "büro sieben": "prosieben",
+        "büro 7": "prosieben",
+    }
+    for wrong, right in stt_fixes.items():
+        normalized = normalized.replace(wrong, right)
+
+    # Zattoo TV-Channel-Datenbank (Name → URL)
+    zattoo_channels = {
+        # Schweizer Sender
+        "srf 1": "srf_1", "srf1": "srf_1", "srf eins": "srf_1",
+        "srf 2": "srf_zwei", "srf2": "srf_zwei", "srf zwei": "srf_zwei",
+        "srf info": "srf_info",
+        "3+": "3plus", "3 plus": "3plus", "3plus": "3plus",
+        "4+": "4plus", "4 plus": "4plus",
+        "5+": "5plus", "5 plus": "5plus",
+        "6+": "6plus", "6 plus": "6plus",
+        "tv24": "tv24", "tv 24": "tv24",
+        "tv25": "tv25", "tv 25": "tv25",
+        "telezüri": "telezueri", "tele züri": "telezueri",
+        "telebärn": "telebaern", "tele bärn": "telebaern",
+        "tele m1": "telem1", "telem1": "telem1",
+        "rts un": "rts_un", "rts 1": "rts_un",
+        "rts deux": "rts_deux", "rts 2": "rts_deux",
+        "rsi la 1": "rsi_la_1", "rsi 1": "rsi_la_1",
+        # Deutsche Sender (Zattoo Deutschland)
+        "pro sieben": "prosieben", "prosieben": "prosieben", "pro7": "prosieben", "pro 7": "prosieben",
+        "sat 1": "sat_1", "sat1": "sat_1", "sat eins": "sat_1",
+        "rtl": "rtl",
+        "rtl 2": "rtl_2", "rtl2": "rtl_2",
+        "vox": "vox",
+        "kabel 1": "kabel_eins", "kabel1": "kabel_eins", "kabel eins": "kabel_eins",
+        "zdf": "zdf",
+        "ard": "ard", "das erste": "ard",
+        "arte": "arte",
+        "3sat": "3sat",
+        # Internationale Musik/Kultur-Sender
+        "mtv": "mtv",
+        "comedy central": "comedy_central",
+        "deluxe music": "deluxemusic",
+        # Allgemein
+        "zattoo": None,
+    }
+
+    # Prüfe ob eine Zattoo-URL gewünscht ist (explizit oder implizit bei TV-Sendern)
+    wants_zattoo = "zattoo" in normalized or "saturn" in normalized
+    # TV-Sender ohne explizite Plattformangabe → auch via Zattoo
+    for channel_name, channel_id in zattoo_channels.items():
+        if channel_name in normalized:
+            if channel_id is not None:
+                url = f"https://zattoo.com/watch/{channel_id}"
+                return (f"Zattoo {channel_name.title()}", url)
+            else:
+                return ("Zattoo", "https://zattoo.com")
+
+    # Nur "zattoo" ohne spezifischen Sender
     if normalized == "zattoo":
         return ("Zattoo", "https://zattoo.com")
+
     return None
 
 
@@ -1280,6 +1342,8 @@ async def get_open_windows(context: RunContext) -> str:
 async def update_agent_memory(context: RunContext, information: str, category: str = "general") -> str:
     """Speichere wichtige Informationen über den Nutzer oder das System dauerhaft.
     Nutze dies, um dir Vorlieben, Pfade zu Programmen oder gelernte Abläufe zu merken.
+    WICHTIG: Wenn der Nutzer persönliche Infos teilt (Name, Vorlieben, Gewohnheiten),
+    speichere sie SOFORT mit diesem Tool unter category='preferences'.
     
     Args:
         information: Die Information, die gespeichert werden soll (z.B. 'NotebookLM liegt auf dem Desktop')
@@ -1293,12 +1357,21 @@ async def update_agent_memory(context: RunContext, information: str, category: s
         with open(memory_file, "a", encoding="utf-8") as f:
             f.write(entry)
 
+        # Spiegeln nach PAI LEARNING
         try:
             from pai_paths import mirror_voice_memory_to_pai
 
             mirror_voice_memory_to_pai(information, category)
         except Exception as mirror_err:
             logger.warning("PAI voice memory mirror failed: %s", mirror_err)
+
+        # Spiegeln nach Hermes MEMORY.md (gemeinsames Gehirn)
+        try:
+            from shared_brain import sync_elite_memory_to_hermes
+
+            sync_elite_memory_to_hermes(information, category)
+        except Exception as hermes_err:
+            logger.warning("Hermes memory sync failed: %s", hermes_err)
 
         logger.info(f"Memory updated ({memory_file}): {information}")
         return f"Ich habe mir das gemerkt: {information}"

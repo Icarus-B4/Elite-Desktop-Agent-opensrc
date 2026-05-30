@@ -7,7 +7,13 @@ contextBridge.exposeInMainWorld('eliteAPI', {
   showWindow: () => ipcRenderer.send('elite-show-window'),
   quitApp: () => ipcRenderer.send('elite-quit-app'),
   getRuntimeStatus: () => ipcRenderer.invoke('elite-runtime-status'),
+  ensureRuntimeHealthy: (opts) => ipcRenderer.invoke('elite-ensure-runtime-healthy', opts),
   restartPaiPulse: () => ipcRenderer.invoke('elite-restart-pai-pulse'),
+  onRuntimeRepaired: (callback) => {
+    const handler = (_event, status) => callback(status);
+    ipcRenderer.on('elite-runtime-repaired', handler);
+    return () => ipcRenderer.removeListener('elite-runtime-repaired', handler);
+  },
   openWidgetWindow: (widgetId, bounds) =>
     ipcRenderer.invoke('elite-open-widget-window', widgetId, bounds),
   closeWidgetWindow: (widgetId) =>
