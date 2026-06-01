@@ -13,6 +13,7 @@ DEFAULT_ELITE_SETTINGS: dict = {
     "camera_flipped": False,
     "cad_output_dir": "",
     "mock_hardware": True,
+    "clap_sensitivity": 3,
     "tool_permissions": {
         "generate_cad_prototype": False,
         "iterate_cad_prototype": False,

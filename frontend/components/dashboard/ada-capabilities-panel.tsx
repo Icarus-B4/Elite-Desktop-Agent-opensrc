@@ -10,6 +10,7 @@ interface AdaSettings {
   mock_hardware?: boolean;
   gesture_sensitivity?: number;
   camera_flipped?: boolean;
+  clap_sensitivity?: number;
 }
 
 export function AdaCapabilitiesPanel() {
@@ -19,6 +20,7 @@ export function AdaCapabilitiesPanel() {
     mock_hardware: true,
     gesture_sensitivity: 2,
     camera_flipped: true,
+    clap_sensitivity: 3,
   });
   const [saving, setSaving] = useState(false);
 
@@ -31,7 +33,12 @@ export function AdaCapabilitiesPanel() {
         mock_hardware: data.mock_hardware ?? true,
         gesture_sensitivity: data.gesture_sensitivity ?? 2,
         camera_flipped: data.camera_flipped ?? true,
+        clap_sensitivity: data.clap_sensitivity ?? 2,
       });
+      if (data.clap_sensitivity !== undefined) {
+        localStorage.setItem('elite-clap-sensitivity', String(data.clap_sensitivity));
+        window.dispatchEvent(new CustomEvent('elite-clap-sensitivity-changed', { detail: data.clap_sensitivity }));
+      }
     } catch {
       /* ignore */
     }
@@ -52,6 +59,10 @@ export function AdaCapabilitiesPanel() {
         body: JSON.stringify(next),
       });
       window.dispatchEvent(new CustomEvent('elite-gesture-settings', { detail: next }));
+      if (patch.clap_sensitivity !== undefined) {
+        localStorage.setItem('elite-clap-sensitivity', String(patch.clap_sensitivity));
+        window.dispatchEvent(new CustomEvent('elite-clap-sensitivity-changed', { detail: patch.clap_sensitivity }));
+      }
     } finally {
       setTimeout(() => setSaving(false), 400);
     }
@@ -137,19 +148,42 @@ export function AdaCapabilitiesPanel() {
         </button>
       </div>
 
-      <div className="mt-4">
-        <label className="text-[10px] text-white/45 uppercase tracking-wider">
-          Gesten-Sensitivität: {ada.gesture_sensitivity?.toFixed(1)}
-        </label>
-        <input
-          type="range"
-          min={0.5}
-          max={4}
-          step={0.5}
-          value={ada.gesture_sensitivity ?? 2}
-          onChange={(e) => void save({ gesture_sensitivity: Number(e.target.value) })}
-          className="w-full mt-2 accent-cyan-400"
-        />
+      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label className="text-[10px] text-white/45 uppercase tracking-wider">
+            Gesten-Sensitivität: {ada.gesture_sensitivity?.toFixed(1)}
+          </label>
+          <input
+            type="range"
+            min={0.5}
+            max={4}
+            step={0.5}
+            value={ada.gesture_sensitivity ?? 2}
+            onChange={(e) => void save({ gesture_sensitivity: Number(e.target.value) })}
+            className="w-full mt-2 accent-cyan-400"
+          />
+        </div>
+        <div>
+          <label className="text-[10px] text-white/45 uppercase tracking-wider flex justify-between">
+            <span>Clap-Sensitivität:</span>
+            <span className="text-cyan-400 font-bold">
+              {ada.clap_sensitivity === 0 ? 'Deaktiviert' :
+               ada.clap_sensitivity === 1 ? 'Empfindlich' :
+               ada.clap_sensitivity === 2 ? 'Normal' :
+               ada.clap_sensitivity === 3 ? 'Robust (empfohlen)' :
+               'Max. Strict'}
+            </span>
+          </label>
+          <input
+            type="range"
+            min={0}
+            max={4}
+            step={1}
+            value={ada.clap_sensitivity ?? 2}
+            onChange={(e) => void save({ clap_sensitivity: Number(e.target.value) })}
+            className="w-full mt-2 accent-cyan-400"
+          />
+        </div>
       </div>
     </div>
   );

@@ -2560,57 +2560,69 @@ function CustomVoiceControls({
   const [hasMicPublication, setHasMicPublication] = useState(false);
   const [micTrack, setMicTrack] = useState<MediaStreamTrack | null>(null);
   const [localAnalyserTrack, setLocalAnalyserTrack] = useState<MediaStreamTrack | null>(null);
+  const clapTapStreamRef = useRef<MediaStream | null>(null);
+  const clapTapDeviceRef = useRef<string>('');
   const autoMicStartedRef = useRef(false);
   const micLiveRef = useRef(false);
 
+  /** Dauerhafter Mic-Tap nur für Pegel + Clap (unabhängig von LiveKit Mute). */
   useEffect(() => {
-    let active = true;
-    let localStream: MediaStream | null = null;
+    if (!localParticipant) {
+      clapTapStreamRef.current?.getTracks().forEach((t) => t.stop());
+      clapTapStreamRef.current = null;
+      clapTapDeviceRef.current = '';
+      setLocalAnalyserTrack(null);
+      return;
+    }
 
-    async function startLocalAnalyser() {
-      if (!hasMicPublication) {
-        setLocalAnalyserTrack((prev) => {
-          if (prev) prev.stop();
-          return null;
-        });
+    let cancelled = false;
+
+    void (async () => {
+      const sameDevice = clapTapDeviceRef.current === selectedDeviceId;
+      const existing = clapTapStreamRef.current?.getAudioTracks()[0];
+      if (sameDevice && existing?.readyState === 'live') {
+        setLocalAnalyserTrack(existing);
         return;
       }
 
-      try {
-        const constraints = selectedDeviceId
-          ? { audio: { deviceId: { exact: selectedDeviceId } } }
-          : { audio: true };
-        localStream = await navigator.mediaDevices.getUserMedia(constraints);
-        const track = localStream.getAudioTracks()[0];
-        if (active) {
-          setLocalAnalyserTrack(track);
-        } else {
-          track.stop();
-        }
-      } catch (err) {
-        console.warn("[Hardware] Fehler beim Starten des lokalen Analyser-Tracks:", err);
-      }
-    }
+      clapTapStreamRef.current?.getTracks().forEach((t) => t.stop());
 
-    void startLocalAnalyser();
+      try {
+        const baseAudio = {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        };
+        const constraints = selectedDeviceId
+          ? { audio: { ...baseAudio, deviceId: { exact: selectedDeviceId } } }
+          : { audio: baseAudio };
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        clapTapStreamRef.current = stream;
+        clapTapDeviceRef.current = selectedDeviceId;
+        setLocalAnalyserTrack(stream.getAudioTracks()[0] ?? null);
+      } catch (err) {
+        console.warn('[ClapDetector] Mic-Tap für Klatschen/Pegel fehlgeschlagen:', err);
+      }
+    })();
 
     return () => {
-      active = false;
-      if (localStream) {
-        localStream.getTracks().forEach((t) => t.stop());
-      }
+      cancelled = true;
     };
-  }, [hasMicPublication, selectedDeviceId]);
+  }, [localParticipant, selectedDeviceId]);
 
   const { levels: micAnalyzerLevels } = useAudioAnalyzer(localAnalyserTrack);
 
   useClapDetector(
     localAnalyserTrack,
     () => {
-      console.log("[ClapDetector] Double Clap triggert Mikrofon-Stummschaltung!");
+      console.log('[ClapDetector] Doppelklatschen erkannt — schalte Mikrofon um.');
       void toggleMic();
     },
-    !!localParticipant
+    Boolean(localParticipant && localAnalyserTrack?.readyState === 'live'),
   );
   const isLoadedRef = useRef(false);
   const emitDebugLog = useCallback(

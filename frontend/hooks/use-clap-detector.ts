@@ -1,24 +1,85 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import {
+  CLAP_SENSITIVITY_PRESETS,
+  StrictDoubleClapEngine,
+  measureBands,
+  tryAcquireClapTriggerLock,
+} from './clap-detector-engine';
 import { getAudioContext } from './use-audio-analyzer';
 
+const KEYBOARD_GUARD_MS = 900;
+const TRIGGER_COOLDOWN_MS = 2200;
+
+/** Eine globale Pipeline pro Track — verhindert parallele ScriptProcessor. */
+const pipelineByTrackId = new Map<
+  string,
+  { refcount: number; teardown: () => void }
+>();
+
 /**
- * Hook zur Erkennung eines Händeklatschens (Clap Detection).
- * Analysiert den Audiostream direkt im Audio-Thread des Browsers (via ScriptProcessorNode).
- * Nutzt hochsensible Parameter für Onset-Flanke und Spektralenergie bei gleichzeitiger
- * Beibehaltung der strengen Daueranalyse (Decay im nächsten Puffer), damit normales/leiseres
- * Klatschen mühelos erkannt wird, während Sprache weiterhin absolut blockiert bleibt.
+ * Strikte Doppelklatsch-Erkennung (Impuls + Abfall + Zeitfenster).
+ * Sprache und Tastatur werden über Form, Median und Tastatur-Sperre gefiltert.
  */
 export function useClapDetector(
   track: MediaStreamTrack | null,
   onDoubleClap: () => void,
-  enabled: boolean = true
+  enabled: boolean = true,
 ) {
   const onDoubleClapRef = useRef(onDoubleClap);
   onDoubleClapRef.current = onDoubleClap;
 
+  const keyboardGuardUntilRef = useRef(0);
+
+  const [sensitivity, setSensitivity] = useState<number>(() => {
+    if (typeof window === 'undefined') return 3;
+    const stored = localStorage.getItem('elite-clap-sensitivity');
+    const n = stored ? Number(stored) : 3;
+    return n === 2 ? 3 : n;
+  });
+
   useEffect(() => {
-    if (!enabled || !track || track.readyState !== 'live') {
+    const handleChanged = (e: CustomEvent<number>) => {
+      setSensitivity(e.detail);
+    };
+    window.addEventListener('elite-clap-sensitivity-changed' as any, handleChanged);
+    return () => {
+      window.removeEventListener('elite-clap-sensitivity-changed' as any, handleChanged);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!enabled || typeof window === 'undefined') return;
+
+    const armKeyboardGuard = () => {
+      keyboardGuardUntilRef.current = Date.now() + KEYBOARD_GUARD_MS;
+    };
+
+    window.addEventListener('keydown', armKeyboardGuard, true);
+    window.addEventListener('keyup', armKeyboardGuard, true);
+    return () => {
+      window.removeEventListener('keydown', armKeyboardGuard, true);
+      window.removeEventListener('keyup', armKeyboardGuard, true);
+    };
+  }, [enabled]);
+
+  useEffect(() => {
+    const preset = CLAP_SENSITIVITY_PRESETS[sensitivity];
+    const trackId = track?.id;
+
+    if (!enabled || !preset || !track || track.readyState !== 'live' || !trackId) {
       return;
+    }
+
+    const existing = pipelineByTrackId.get(trackId);
+    if (existing) {
+      existing.refcount++;
+      return () => {
+        existing.refcount--;
+        if (existing.refcount <= 0) {
+          existing.teardown();
+          pipelineByTrackId.delete(trackId);
+        }
+      };
     }
 
     const context = getAudioContext();
@@ -28,117 +89,78 @@ export function useClapDetector(
       void context.resume();
     }
 
+    const engine = new StrictDoubleClapEngine(preset);
     const stream = new MediaStream([track]);
     const source = context.createMediaStreamSource(stream);
-    
-    // ScriptProcessorNode für drosselungsresistente Hintergrundanalyse im Audio-Thread.
-    const bufferSize = 2048;
-    const scriptNode = context.createScriptProcessor(bufferSize, 1, 1);
-    
+
+    const highpass = context.createBiquadFilter();
+    highpass.type = 'highpass';
+    highpass.frequency.value = 220;
+    highpass.Q.value = 0.707;
+
+    const lowpass = context.createBiquadFilter();
+    lowpass.type = 'lowpass';
+    lowpass.frequency.value = 3000;
+    lowpass.Q.value = 0.707;
+
     const analyser = context.createAnalyser();
-    analyser.fftSize = 256; // 128 Frequenzbänder (Bins)
+    analyser.fftSize = 256;
     const frequencyData = new Uint8Array(analyser.frequencyBinCount);
 
-    source.connect(analyser);
-    analyser.connect(scriptNode);
-    scriptNode.connect(context.destination);
+    const bufferSize = 2048;
+    const scriptNode = context.createScriptProcessor(bufferSize, 1, 1);
+    const silentGain = context.createGain();
+    silentGain.gain.value = 0;
 
-    let longEnergy = 1.0; // Dynamischer Rauschpegel (TV, Hintergrund)
-    let prevRms = 1.0; // Pegel des vorherigen Puffers zur Flankenanalyse
-    let lastClapBufferIndex = 0;
-    let bufferCount = 0;
-    
-    let isPeak = false;
-    let peakValue = 0;
-    let peakIndex = 0;
-    let cooldownUntilBuffer = 0;
+    source.connect(highpass);
+    highpass.connect(lowpass);
+    lowpass.connect(analyser);
+    lowpass.connect(scriptNode);
+    scriptNode.connect(silentGain);
+    silentGain.connect(context.destination);
 
-    scriptNode.onaudioprocess = (audioProcessingEvent) => {
+    const onAudio = (event: AudioProcessingEvent) => {
       if (track.readyState !== 'live') return;
 
-      bufferCount++;
-      const inputBuffer = audioProcessingEvent.inputBuffer;
-      const inputData = inputBuffer.getChannelData(0);
-      const len = inputData.length;
+      const now = Date.now();
+      if (now < keyboardGuardUntilRef.current) return;
 
-      // 1. RMS (Effektivwert des Pegels) aus der Time-Domain berechnen
-      let sum = 0;
-      for (let i = 0; i < len; i++) {
-        const val = inputData[i];
-        sum += val * val;
-      }
-      const rms = Math.sqrt(sum / len) * 100;
-
-      // Langsame Anpassung des Hintergrundrauschens (TV, Gespräche)
-      if (rms < longEnergy * 2) {
-        longEnergy = longEnergy * 0.995 + rms * 0.005;
-      } else {
-        longEnergy = longEnergy * 0.999 + rms * 0.001;
-      }
-      longEnergy = Math.max(longEnergy, 0.3); // Mindestrauschpegel
-
-      // Frequenzdaten holen
+      const input = event.inputBuffer.getChannelData(0);
       analyser.getByteFrequencyData(frequencyData);
+      const bands = measureBands(frequencyData);
 
-      // Spektral-Verhältnis berechnen (Höhen zu Tiefen/Mitten)
-      // Bins 0-8: 0Hz bis 1500Hz, Bins 12-40: 2250Hz bis 7500Hz
-      let lowEnergy = 0;
-      for (let i = 0; i <= 8; i++) {
-        lowEnergy += frequencyData[i];
-      }
-      let highEnergy = 0;
-      for (let i = 12; i <= 40; i++) {
-        highEnergy += frequencyData[i];
-      }
-      const spectralRatio = lowEnergy > 0 ? highEnergy / lowEnergy : 0;
-
-      // A. Erkennung eines Onsets (sensiblere Parameter für normales Klatschen)
-      // Ein Klatschen muss:
-      // 1. Eine geringere Mindestlautstärke haben (rms > 3.5)
-      // 2. Das 3.0-fache des Rauschens übersteigen (rms > longEnergy * 3.0)
-      // 3. Mindestens das 2.0-fache des vorherigen Pegels betragen (Flankensteilheit)
-      // 4. Einen gewissen Höhenanteil besitzen (spectralRatio > 0.30)
-      if (!isPeak && rms > 3.5 && rms > longEnergy * 3.0 && rms > prevRms * 2.0 && spectralRatio > 0.30 && bufferCount > cooldownUntilBuffer) {
-        isPeak = true;
-        peakValue = rms;
-        peakIndex = bufferCount;
-      } else if (isPeak) {
-        // B. Analyse des direkten Nachfolge-Puffers (Decay-Prüfung)
-        const elapsed = bufferCount - peakIndex;
-        if (elapsed === 1) {
-          // Im direkt nächsten Puffer (ca. 45ms später) muss der Pegel auf unter 45% abfallen.
-          // Dies blockiert jegliche Sprache/Gesang/TV-Ton zuverlässig.
-          if (rms < peakValue * 0.45) {
-            isPeak = false;
-            cooldownUntilBuffer = bufferCount + 4; // Cooldown von 4 Puffern (ca. 180ms)
-            
-            const buffersSinceLastClap = bufferCount - lastClapBufferIndex;
-            // Double-Clap prüfen (Zeitfenster: 3 bis 18 Puffer, ca. 130ms bis 800ms)
-            if (buffersSinceLastClap >= 3 && buffersSinceLastClap <= 18) {
-              console.log(`[ClapDetector] 🔥 DOUBLE CLAP ERKANNT! Spektral-Ratio: ${spectralRatio.toFixed(2)}, Peak: ${peakValue.toFixed(1)}`);
-              onDoubleClapRef.current();
-              lastClapBufferIndex = 0; // Entprellen für Dreifach-Claps
-            } else {
-              lastClapBufferIndex = bufferCount;
-            }
-          } else {
-            // Signal blieb laut -> Es war Sprache/TV -> verwerfen!
-            isPeak = false;
-          }
-        } else {
-          isPeak = false;
+      if (engine.processFrame(input, bands, now)) {
+        if (tryAcquireClapTriggerLock(TRIGGER_COOLDOWN_MS)) {
+          onDoubleClapRef.current();
         }
       }
-
-      prevRms = rms;
     };
 
-    return () => {
+    scriptNode.onaudioprocess = onAudio;
+
+    const teardown = () => {
+      scriptNode.onaudioprocess = null;
+      engine.reset();
       try {
-        source.disconnect(analyser);
-        analyser.disconnect(scriptNode);
-        scriptNode.disconnect(context.destination);
+        source.disconnect();
+        highpass.disconnect();
+        lowpass.disconnect();
+        analyser.disconnect();
+        scriptNode.disconnect();
+        silentGain.disconnect();
       } catch (_) {}
     };
-  }, [enabled, track]);
+
+    pipelineByTrackId.set(trackId, { refcount: 1, teardown });
+
+    return () => {
+      const entry = pipelineByTrackId.get(trackId);
+      if (!entry) return;
+      entry.refcount--;
+      if (entry.refcount <= 0) {
+        entry.teardown();
+        pipelineByTrackId.delete(trackId);
+      }
+    };
+  }, [enabled, track?.id, sensitivity]);
 }
