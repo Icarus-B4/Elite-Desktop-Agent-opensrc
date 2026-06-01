@@ -3,6 +3,7 @@ Webstark Elite Agent – KI-Agent für webstark.org
 Optimierte Jarvis-Edition.
 """
 import asyncio
+from typing import AsyncIterable
 import json
 import logging
 import os
@@ -156,6 +157,53 @@ SILENCE_PHRASES = (
     "bleib stumm",
     "sei stumm",
 )
+
+# Anti-Plapper-Filter: Typische Füll-Phrasen die NIEMALS gesprochen werden sollen
+PLAPPER_PATTERNS = (
+    "verstanden",
+    "alles klar",
+    "ich bin bereit",
+    "ich bin hier",
+    "bereit für",
+    "wenn sie bereit sind",
+    "wenn du bereit bist",
+    "sobald sie",
+    "sobald du",
+    "bitte sag mir",
+    "bitte sagen sie",
+    "kann ich ihnen",
+    "kann ich dir",
+    "wie kann ich",
+    "was kann ich",
+    "sie zu unterstützen",
+    "dich zu unterstützen",
+    "die erkennung",
+    "solche systeme",
+    "einen klaren",
+    "was möchten sie",
+    "was möchtest du",
+    "was wünschen sie",
+    "ich stehe bereit",
+    "ich höre zu",
+    "ich warte auf",
+)
+
+
+def is_plapper_response(text: str) -> bool:
+    """Erkennt typische Füll-Antworten die unterdrückt werden sollen.
+    
+    Kurze Bestätigungen ohne Inhalt (< 100 Zeichen) die nur aus
+    Füllphrasen bestehen werden als 'Plapper' klassifiziert.
+    """
+    t = (text or "").strip().lower()
+    if not t:
+        return True
+    # Sehr kurze Antworten die nur Füllphrasen enthalten
+    if len(t) < 100:
+        for pattern in PLAPPER_PATTERNS:
+            if pattern in t:
+                return True
+    return False
 
 
 def _replace_wake_aliases(text: str, aliases: tuple[str, ...], canonical: str) -> str:
@@ -534,6 +582,15 @@ class WebstarkAgent(Agent):
         current_mode = soul_matrix_modes[config["soulMatrix"]] if config["soulMatrix"] < len(soul_matrix_modes) else soul_matrix_modes[0]
 
         instructions = (
+            "=== ABSOLUTE KERNREGEL (GILT VOR ALLEM ANDEREN) ===\n"
+            "Du antwortest NUR wenn der Nutzer eine FRAGE stellt oder einen BEFEHL gibt der eine inhaltliche Antwort erfordert.\n"
+            "VERBOTEN (NIEMALS sagen): 'Verstanden', 'Alles klar', 'Ich bin bereit', 'Wenn du bereit bist', "
+            "'Sobald Sie', 'Bitte sag mir', 'Wie kann ich helfen', 'Ich stehe bereit', "
+            "'Ich höre zu', Bestätigungen, Rückfragen ohne Auftrag, Smalltalk, Gesprächseröffnungen.\n"
+            "Wenn der Nutzer KEINEN Befehl gibt und KEINE Frage stellt → ABSOLUT STUMM. Kein einziges Wort.\n"
+            "Wenn ein Tool erfolgreich ausgeführt wird → STUMM, es sei denn das Ergebnis MUSS mitgeteilt werden.\n"
+            "ANTI-ECHO: Wiederhole NIEMALS was der Nutzer gesagt hat. Bestätige NIEMALS Regeln.\n"
+            "=== ENDE KERNREGEL ===\n\n"
             f"IDENTITÄT: {current_mode}\n"
             f"Du bist 'Elite', ein hocheffizienter KI-Desktop-Assistent. "
             f"Deine Stimme ist tief, besonnen und autoritär. Der Nutzer heißt {user_name}.\n\n"
@@ -595,9 +652,14 @@ class WebstarkAgent(Agent):
             "Nur 'read_agent_memory' nutzen, wenn der Nutzer explizit den kompletten Speicher sehen will.\n"
         )
         extra_instructions = (
+            "\n\n=== SCHWEIGE-PROTOKOLL (FINALE ERINNERUNG) ===\n"
             "Du schweigst, wenn du nicht angesprochen wirst. Du lachst nicht, du nickst nicht, du atmest nicht. "
-            "Kein 'ich bin hier', kein 'verstanden', kein 'bereit für den nächsten Befehl'. "
-            "Starte niemals selbst ein Gespräch."
+            "VERBOTENE MUSTER: 'ich bin hier', 'verstanden', 'bereit für den nächsten Befehl', "
+            "'alles klar', 'sobald Sie', 'wenn du bereit bist', 'was kann ich', 'wie kann ich'. "
+            "Starte niemals selbst ein Gespräch. Bei Unsicherheit: STUMM.\n"
+            "Wenn du nach einem Tool-Call nichts Wichtiges zu berichten hast → STUMM.\n"
+            "KURZ-REGEL: Maximal 1-2 Sätze pro Antwort. Keine Einleitungen, keine Verabschiedungen.\n"
+            "=== ENDE SCHWEIGE-PROTOKOLL ===\n"
         )
         if os.path.exists(config_path):
             try:
@@ -653,8 +715,6 @@ class WebstarkAgent(Agent):
                     "\n\n--- PAI WORK STATE ---\n"
                     f"{ws_str}"
                 )
-            
-        instructions += extra_instructions
 
         # Gemeinsames Gehirn (Elite + Hermes Memory) in den Prompt laden
         try:
@@ -663,6 +723,9 @@ class WebstarkAgent(Agent):
                 instructions += brain_context
         except Exception as brain_err:
             logger.warning("Shared Brain konnte nicht geladen werden: %s", brain_err)
+
+        # WICHTIG: Schweige-Protokoll kommt NACH Brain-Memory → hat höchste Priorität (Recency Effect)
+        instructions += extra_instructions
 
         if llm_mode == "local":
             instructions += (
@@ -893,12 +956,39 @@ async def entrypoint(ctx: JobContext):
         # Agent Instanz erstellen
         agent = WebstarkAgent(user_name=user_name, llm_mode=llm_mode)
         agent.room = ctx.room # Direkt am Agenten speichern für einfachen Zugriff
-        
+
+        # Anti-Plapper TTS-Filter: Fängt sinnlose Füll-Antworten ab bevor sie gesprochen werden
+        async def _anti_plapper_tts_cb(text_stream: AsyncIterable[str]) -> AsyncIterable[str]:
+            """Filtert Plapper-Antworten (Verstanden, Alles klar, etc.) vor TTS."""
+            # Streaming-Modus: Text erst sammeln, dann prüfen
+            collected = []
+            async for chunk in text_stream:
+                collected.append(chunk)
+                # Nach 100 Zeichen prüfen ob es Plapper ist
+                full_text = "".join(collected)
+                if len(full_text) >= 100:
+                    # Genug Text — kein Plapper, alles durchlassen
+                    yield full_text
+                    async for remaining in text_stream:
+                        yield remaining
+                    return
+            # Stream ist fertig, Gesamttext prüfen
+            full_text = "".join(collected)
+            if is_plapper_response(full_text):
+                logger.info("[AntiPlapper] Füll-Antwort unterdrückt (stream): '%s'", full_text[:80])
+                return
+            yield full_text
+
         # Session starten – AEC-Warmup reduziert: Standard=3s blockiert Unterbrechungen zu lange
         session = AgentSession(
             aec_warmup_duration=0.5,
             turn_handling=_elite_turn_handling(),
             allow_interruptions=True,
+            tts_text_transforms=[
+                "filter_markdown",
+                "filter_emoji",
+                _anti_plapper_tts_cb,
+            ],
         )
         active_reply_task: asyncio.Task | None = None
         last_activity_time = time.time()
@@ -1543,6 +1633,9 @@ async def entrypoint(ctx: JobContext):
 
         async def inactivity_monitor():
             nonlocal last_activity_time
+            if livekit_mode == "local":
+                logger.info("Inaktivitäts-Monitor im lokalen Modus deaktiviert (keine API-Kosten).")
+                return
             inactivity_timeout = 300  # 5 Minuten Standby
             logger.info("Inaktivitäts-Monitor aktiv. Timeout: %ds", inactivity_timeout)
             while ctx.room.isconnected():

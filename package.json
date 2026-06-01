@@ -28,6 +28,6 @@
   "devDependencies": {
     "cross-env": "^10.1.0",
     "electron": "^42.0.1",
-    "next": "14.2.3"
+    "next": "^16.2.6"
   }
 }

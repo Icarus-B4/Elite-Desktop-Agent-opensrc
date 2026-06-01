@@ -219,6 +219,7 @@ async function freePort(port) {
 async function cleanupOldInstances() {
   if (process.env.ELITE_SKIP_PRESTART === '1') {
     log('[Services] Cleanup übersprungen (elite-prestart bereits gelaufen).', { eliteOnly: true });
+    process.env.ELITE_SKIP_PRESTART = '0';
     return;
   }
   log('[Services] Cleanup: Elite-Python, LiveKit-Worker, Elite-Ports…');
@@ -586,11 +587,41 @@ function findServiceDefinition(name) {
   return lastServiceCommands.find((s) => s.name === name);
 }
 
-function repairSpawnService(name, repairs) {
+async function repairSpawnService(name, repairs) {
   if (isShuttingDown || !lastSpawnContext) return;
   const service = findServiceDefinition(name);
   if (!service) return;
   restartAttempts.delete(name);
+
+  if (name === 'Jarvis Core' || name === 'Backend Agent') {
+    log('[Services] Repariere Jarvis Core: Bereinige Port 7861 und alte Python-Prozesse...');
+    await freePort(7861);
+    try {
+      const psScript = `
+        Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+          Where-Object { $p = $_.CommandLine; $p -and ($p -like "*agent.py*" -or $p -like "*livekit.agents*") } |
+          ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+      `.trim();
+      const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+      await execAsync(`powershell.exe -NoProfile -EncodedCommand ${encoded}`, {
+        windowsHide: true,
+        timeout: 10000,
+      });
+    } catch (e) {
+      log(`[Services] Fehler beim Beenden von alten Python-Prozessen bei Reparatur: ${e.message}`);
+    }
+  } else if (name === 'Frontend') {
+    log('[Services] Repariere Frontend: Bereinige Port 3000...');
+    await freePort(3000);
+  } else if (name === 'PAI Pulse') {
+    log('[Services] Repariere PAI Pulse: Bereinige Port 31337...');
+    await freePort(31337);
+  } else if (name === 'Hermes Stack') {
+    log('[Services] Repariere Hermes Stack: Bereinige Ports 8642 und 9119...');
+    await freePort(8642);
+    await freePort(9119);
+  }
+
   spawnManagedService(service, lastSpawnContext);
   repairs.push(name);
 }
@@ -618,19 +649,19 @@ async function ensureRuntimeHealthy({ reason = 'unknown', force = false } = {}) 
     const repairs = [];
 
     if (!readiness.frontend) {
-      repairSpawnService('Frontend', repairs);
+      await repairSpawnService('Frontend', repairs);
     }
 
     if (!readiness.backend) {
       if (findServiceDefinition('Jarvis Core')) {
-        repairSpawnService('Jarvis Core', repairs);
+        await repairSpawnService('Jarvis Core', repairs);
       } else if (findServiceDefinition('Backend Agent')) {
-        repairSpawnService('Backend Agent', repairs);
+        await repairSpawnService('Backend Agent', repairs);
       }
     }
 
     if (!readiness.hermes) {
-      repairSpawnService('Hermes Stack', repairs);
+      await repairSpawnService('Hermes Stack', repairs);
     }
 
     if (!readiness.pulse) {
@@ -639,7 +670,7 @@ async function ensureRuntimeHealthy({ reason = 'unknown', force = false } = {}) 
       if (pulseOk) {
         repairs.push('PAI Pulse');
       } else {
-        repairSpawnService('PAI Pulse', repairs);
+        await repairSpawnService('PAI Pulse', repairs);
       }
     }
 

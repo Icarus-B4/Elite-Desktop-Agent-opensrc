@@ -52,7 +52,7 @@ fi
 
 # --- Dashboard-Build (einmalig) ---
 ensure_dashboard_dist() {
-  if [[ -f "${WEB_DIR}/dist/index.html" ]]; then
+  if [[ -f "${HERMES_HOME}/hermes-agent/hermes_cli/web_dist/index.html" ]]; then
     return 0
   fi
   if [[ ! -f "${WEB_DIR}/package.json" ]]; then
@@ -93,10 +93,9 @@ if curl -sf -o /dev/null "http://127.0.0.1:9119/"; then
   fi
 fi
 
-if pgrep -f "hermes dashboard" >/dev/null 2>&1; then
-  log "Dashboard-Prozess startet noch…"
-  exit 0
-fi
+# Falls das Dashboard nicht reagiert, raeume eventuelle Zombie- oder haengende dashboard-Prozesse auf
+pkill -f "hermes dashboard" 2>/dev/null || true
+sleep 1
 
 if ! ensure_dashboard_dist; then
   exit 0

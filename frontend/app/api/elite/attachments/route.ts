@@ -18,6 +18,8 @@ const ALLOWED = new Set([
   'application/pdf',
   DOCX_MIME,
   VIDEO_MIME,
+  'text/plain',
+  'text/markdown',
 ]);
 
 const EXT_BY_MIME: Record<string, string> = {
@@ -28,6 +30,8 @@ const EXT_BY_MIME: Record<string, string> = {
   'application/pdf': '.pdf',
   [DOCX_MIME]: '.docx',
   [VIDEO_MIME]: '.mp4',
+  'text/plain': '.txt',
+  'text/markdown': '.md',
 };
 
 /**
@@ -49,11 +53,14 @@ export async function POST(req: NextRequest) {
       if (ext === '.docx') mime = DOCX_MIME;
       else if (ext === '.mp4') mime = VIDEO_MIME;
       else if (ext === '.pdf') mime = 'application/pdf';
+      else if (ext === '.txt') mime = 'text/plain';
+      else if (ext === '.md') mime = 'text/markdown';
+      else if (ext === '.log') mime = 'text/plain';
     }
 
     if (!ALLOWED.has(mime)) {
       return NextResponse.json(
-        { error: 'Nur JPG, PNG, WebP, GIF, PDF, DOCX oder MP4 erlaubt' },
+        { error: 'Nur JPG, PNG, WebP, GIF, PDF, DOCX, TXT, MD, LOG oder MP4 erlaubt' },
         { status: 400 },
       );
     }
@@ -66,7 +73,11 @@ export async function POST(req: NextRequest) {
     fs.writeFileSync(path.join(dir, filename), buffer);
 
     const url =
-      mime === 'application/pdf' || mime === DOCX_MIME || mime === VIDEO_MIME
+      mime === 'application/pdf' ||
+      mime === DOCX_MIME ||
+      mime === VIDEO_MIME ||
+      mime === 'text/plain' ||
+      mime === 'text/markdown'
         ? `/api/elite/attachments?file=${encodeURIComponent(filename)}`
         : `/api/elite/gallery/image?file=${encodeURIComponent(filename)}`;
 
@@ -88,6 +99,13 @@ export async function POST(req: NextRequest) {
         if (raw) textPreview = raw.slice(0, PDF_TEXT_MAX);
       } catch (e) {
         console.warn('DOCX text extraction failed:', e);
+      }
+    } else if (mime === 'text/plain' || mime === 'text/markdown') {
+      try {
+        const raw = buffer.toString('utf-8').trim();
+        if (raw) textPreview = raw.slice(0, PDF_TEXT_MAX);
+      } catch (e) {
+        console.warn('Text file extraction failed:', e);
       }
     }
 
@@ -125,13 +143,19 @@ export async function GET(req: NextRequest) {
           ? DOCX_MIME
           : ext === '.mp4'
             ? VIDEO_MIME
-            : ext === '.png'
-              ? 'image/png'
-              : ext === '.webp'
-                ? 'image/webp'
-                : ext === '.gif'
-                  ? 'image/gif'
-                  : 'image/jpeg';
+            : ext === '.txt'
+              ? 'text/plain'
+              : ext === '.md'
+                ? 'text/markdown'
+                : ext === '.log'
+                  ? 'text/plain'
+                  : ext === '.png'
+                    ? 'image/png'
+                    : ext === '.webp'
+                      ? 'image/webp'
+                      : ext === '.gif'
+                        ? 'image/gif'
+                        : 'image/jpeg';
 
     const fileBuffer = fs.readFileSync(filePath);
     return new NextResponse(fileBuffer, {

@@ -66,7 +66,7 @@ export function EliteChatComposer({
   const addFiles = useCallback((files: FileList | File[]) => {
     const list = Array.from(files).filter(isChatAttachmentFile);
     if (list.length === 0) {
-      setError('Nur PNG/JPG, PDF, DOCX oder MP4 erlaubt');
+      setError('Nur PNG/JPG, PDF, DOCX, TXT, MD, LOG oder MP4 erlaubt');
       return;
     }
     setError(null);
@@ -222,7 +222,7 @@ export function EliteChatComposer({
       <input
         ref={fileRef}
         type="file"
-        accept="image/jpeg,image/png,image/webp,image/gif,application/pdf,.docx,video/mp4,.mp4"
+        accept="image/jpeg,image/png,image/webp,image/gif,application/pdf,.docx,video/mp4,.mp4,text/plain,.txt,.md,.log"
         multiple
         className="hidden"
         onChange={(e) => {

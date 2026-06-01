@@ -146,8 +146,8 @@ async function main() {
     const { listenPort, targetPort, name } = config;
     const targetUrl = `http://${wslIp}:${targetPort}/`;
     
-    // Bei Gateway-Probe /v1/models nutzen, da / oft blockiert ist
-    const probeUrl = targetPort === 8642 ? `http://${wslIp}:${targetPort}/v1/models` : targetUrl;
+    // Bei Gateway-Probe /v1/health nutzen (benoetigt keinen API-Key und spamt das Log nicht)
+    const probeUrl = targetPort === 8642 ? `http://${wslIp}:${targetPort}/v1/health` : targetUrl;
     
     if (!(await probeHttp(probeUrl))) {
       log(`${name} in WSL nicht erreichbar (${probeUrl}) — überspringe Proxy.`);
